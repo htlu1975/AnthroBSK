@@ -1,0 +1,7 @@
+# Keep text as LF in the repo so the same content never conflicts as a
+# whole-file CRLF-vs-LF rewrite again (that is what forked main in Oct 2026).
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.png binary
