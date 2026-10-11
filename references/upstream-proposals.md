@@ -36,7 +36,7 @@ fix properly. Measurements from README/SKILL (Windows, Chrome 155, bsk 0.3.2).
   `pressure: 0.5` while down, 0 untrusted events. Verified against a `<button>`
   whose handler fired.
 - **Ask:** `bsk click --hold-ms <n> --move-ms <n> [--dwell-ms <n>]` dispatched
-  through the same native path, so hover ??dwell ??press ??hold ??release is one
+  through the same native path, so hover → dwell → press → hold → release is one
   gesture instead of teleport + 6 ms tap. This is the last piece that still needs
   the skill to shell out to Windows-only code.
 
