@@ -23,7 +23,7 @@ input queue rather than through CDP. Feed it the zhuyin readings and it types
 Chinese with a genuine composition stream - keydown reports key="Process" /
 keyCode 229, there are two keyups per key, and the page sees compositionstart /
 compositionupdate / insertCompositionText with isComposing true. Verified by
-typing `w961o3` (??? then ???) to get ?啣?, on Windows with Microsoft Bopomofo
+typing `w961o3` (ㄊㄞˊ then ㄅㄟˇ) to get 台北, on Windows with Microsoft Bopomofo
 active. The tone mark auto-commits, so no Space is needed.
 
 Two consequences to handle:
