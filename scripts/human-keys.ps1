@@ -8,20 +8,31 @@ Why not `bsk press` (measured on Windows, Chrome 155, bsk 0.3.2):
     insertText input event. Its --hold-ms is honoured too.
   - But each call costs a full daemon round trip, so consecutive keys land
     ~660 ms apart. That is far slower than a human and is itself a signature.
-  - keybd_event from this script lands around 190 ms per key at the defaults,
-    with per-key jitter. `Start-Sleep` on Windows has ~15 ms granularity, so the
-    real figure sits a little above the nominal hold + gap.
+  - keybd_event from this script lands around 190-230 ms per key at the defaults,
+    with log-normal jitter, burst pauses every 8-15 keys, and bigram speedups.
+    `Start-Sleep` on Windows has ~15 ms granularity, so the real figure sits a
+    little above the nominal hold + gap.
 
 Requirements:
   - The Agent Window must be the foreground window. keystrokes go to the focused
     window, and bsk's overlay does not intercept the keyboard, so page focus
-    still has to be set with `bsk focus @ref` before calling this.
+    still has to be set with `bsk click --selector '<css>'` before calling this.
 
-CJK is deliberately not supported here. Typing Chinese through the real IME
-means driving candidate selection, and the layout handle resolves to 0x0 in this
-context, so character translation is unreliable. Paste instead - a clipboard
-paste produces a genuine `insertFromPaste` input event, which is exactly what a
-human paste produces.
+CJK: this script DOES reach the real IME, because keybd_event goes through the OS
+input queue rather than through CDP. Feed it the zhuyin readings and it types
+Chinese with a genuine composition stream - keydown reports key="Process" /
+keyCode 229, there are two keyups per key, and the page sees compositionstart /
+compositionupdate / insertCompositionText with isComposing true. Verified by
+typing `w961o3` (ㄊㄞˊ then ㄅㄟˇ) to get 台北, on Windows with Microsoft Bopomofo
+active. The tone mark auto-commits, so no Space is needed.
+
+Two consequences to handle:
+  - The IME mode is sticky per window. After a CJK run the next ASCII run is
+    silently converted to zhuyin; send one OS-level Shift to switch back.
+  - `bsk press` can do neither job: CDP input bypasses the IME completely. With
+    the IME in Chinese mode, `bsk press a` inserts a literal "a".
+Paste stays the simpler default for arbitrary CJK - a paste produces a genuine
+`insertFromPaste` and needs no per-character readings.
 
 Usage:
   & human-keys.ps1 -WindowTitleLike "My Page - Google Chrome" -Text "hello world"
@@ -36,6 +47,9 @@ param(
   [int]$GapMsMin = 45,
   [int]$GapMsMax = 190,
   [double]$TypoRate = 0.03,      # chance of a wrong key followed by a correction
+  [double]$TransposeRate = 0.005, # chance of swapping two adjacent chars then fixing
+  [int]$BurstMin = 8,             # burst-pause: think pause every N chars
+  [int]$BurstMax = 15,
   [int]$StartDelayMs = 400,
   [int]$Seed = 0,
   [switch]$ListWindows
@@ -124,13 +138,49 @@ function Set-ForegroundVerified([System.IntPtr]$top, [int]$Attempts = 3) {
 function Send-Key([int]$vk, [bool]$shift, [int]$holdMs) {
   $scan = [byte][K.U]::MapVirtualKeyW([uint32]$vk, 0)
   $shiftScan = [byte][K.U]::MapVirtualKeyW([uint32]$VK_SHIFT, 0)
-  if ($shift) { [K.U]::keybd_event([byte]$VK_SHIFT, $shiftScan, 0, [System.UIntPtr]::Zero) }
+  # Human Shift leads the key by 10-40 ms and lingers 10-30 ms after release.
+  if ($shift) { [K.U]::keybd_event([byte]$VK_SHIFT, $shiftScan, 0, [System.UIntPtr]::Zero); Start-Sleep -Milliseconds ($rnd.Next(10, 41)) }
   [K.U]::keybd_event([byte]$vk, $scan, 0, [System.UIntPtr]::Zero)
   Start-Sleep -Milliseconds $holdMs
   [K.U]::keybd_event([byte]$vk, $scan, 0x0002, [System.UIntPtr]::Zero)
-  if ($shift) { [K.U]::keybd_event([byte]$VK_SHIFT, $shiftScan, 0x0002, [System.UIntPtr]::Zero) }
+  if ($shift) { Start-Sleep -Milliseconds ($rnd.Next(10, 31)); [K.U]::keybd_event([byte]$VK_SHIFT, $shiftScan, 0x0002, [System.UIntPtr]::Zero) }
 }
-function Pause-Gap { Start-Sleep -Milliseconds ($rnd.Next($GapMsMin, $GapMsMax + 1)) }
+# QWERTY adjacency (US layout, lowercase). Typo picks a physical neighbour of
+# the intended key instead of a random vowel, so the error looks like a miss.
+$adjacent = @{
+  'q'=@('w','a','1'); 'w'=@('q','e','a','s','2'); 'e'=@('w','r','s','d','3')
+  'r'=@('e','t','d','f','4'); 't'=@('r','y','f','g','5'); 'y'=@('t','u','g','h','6')
+  'u'=@('y','i','h','j','7'); 'i'=@('u','o','j','k','8'); 'o'=@('i','p','k','l','9')
+  'p'=@('o','l','0'); 'a'=@('q','w','s','z'); 's'=@('w','e','a','d','x','z')
+  'd'=@('e','r','s','f','x','c'); 'f'=@('r','t','d','g','c','v'); 'g'=@('t','y','f','h','v','b')
+  'h'=@('y','u','g','j','b','n'); 'j'=@('u','i','h','k','n','m'); 'k'=@('i','o','j','l','m')
+  'l'=@('o','p','k',';'); 'z'=@('a','s','x'); 'x'=@('z','s','d','c'); 'c'=@('x','d','f','v')
+  'v'=@('c','f','g','b'); 'b'=@('v','g','h','n'); 'n'=@('b','h','j','m'); 'm'=@('n','j','k',',')
+  ','=@('m','k','.'); '.'=@(',','l','/'); '/'=@('.',';')
+  ' '=@(' '); "`t"=@("`t"); "`n"=@("`n")
+}
+# Frequent English bigrams type ~30% faster; rare pairs ~25% slower.
+# Space-adjacent keys pause longer (word boundary planning).
+$frequentBigrams = @('th','he','in','er','an','re','on','at','en','nd','ti','es','or','te','of','ed','is','it','al','ar','st','to','nt','ng','se','ha','as','ou','io','le','ve','co','me','de','hi','ri','ro','ic','ne','ea','ra','ce','li','ch','ll','be','ma','si','om','ur')
+function Get-GapMs([string]$prev, [string]$curr) {
+  # Log-normal-ish: uniform base warped by Box-Muller gaussian so most gaps
+  # cluster near the low end with a long tail, like human inter-key times.
+  $u1 = [Math]::Max(1e-6, $rnd.NextDouble()); $u2 = $rnd.NextDouble()
+  $z = [Math]::Sqrt(-2.0 * [Math]::Log($u1)) * [Math]::Cos(2.0 * [Math]::PI * $u2)  # ~N(0,1)
+  $base = ($GapMsMin + $GapMsMax) / 2.0 + $z * (($GapMsMax - $GapMsMin) / 4.0)
+  if ($base -lt $GapMsMin) { $base = $GapMsMin + $rnd.Next(0, 15) }
+  if ($base -gt ($GapMsMax * 2.2)) { $base = $GapMsMax * 2.2 }
+  $factor = 1.0
+  if ($prev -ne $null -and $prev.Length -gt 0) {
+    $bg = ($prev + $curr).ToLower()
+    if ($frequentBigrams -contains $bg) { $factor = 0.7 }
+    elseif ($prev -eq $curr) { $factor = 0.75 }   # double letters are fast
+    elseif ($prev -eq ' ' -or $curr -eq ' ') { $factor = 1.35 }  # word boundaries
+    elseif ($curr -match '[A-Z]' -and $prev -cmatch '[a-z]') { $factor = 1.2 }
+  }
+  return [int][Math]::Max($GapMsMin, $base * $factor)
+}
+function Pause-Gap([string]$prev, [string]$curr) { Start-Sleep -Milliseconds (Get-GapMs $prev $curr) }
 
 if ($ListWindows) {
   Write-Output "foreground: '$([K.U]::TitleOf([K.U]::GetForegroundWindow()))'"
@@ -166,36 +216,78 @@ Start-Sleep -Milliseconds $StartDelayMs
 $unsupported = @()
 $t0 = [DateTime]::UtcNow
 $typed = 0
-foreach ($ch in $Text.ToCharArray()) {
+$chars = $Text.ToCharArray()
+$prevKey = ''
+$sinceBurst = 0
+$nextBurstAt = $rnd.Next($BurstMin, $BurstMax + 1)
+$typos = 0; $transposes = 0; $bursts = 0
+for ($idx = 0; $idx -lt $chars.Length; $idx++) {
+  $ch = $chars[$idx]
   $key = [string]$ch
-  if ($ch -eq "`n") { Send-Key 0x0D $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); $typed++; Pause-Gap; continue }
-  if ($ch -eq "`t") { Send-Key 0x09 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); $typed++; Pause-Gap; continue }
+  if ($ch -eq "`n") { Send-Key 0x0D $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); $typed++; Pause-Gap $prevKey $key; $prevKey = $key; continue }
+  if ($ch -eq "`t") { Send-Key 0x09 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); $typed++; Pause-Gap $prevKey $key; $prevKey = $key; continue }
   if (-not $table.ContainsKey($key)) { $unsupported += $key; continue }
 
   $hold = $rnd.Next($HoldMsMin, $HoldMsMax + 1)
 
-  # Human slip: hit a neighbouring key, notice it, backspace, retype. The text
-  # that ends up in the field is still exactly what was asked for.
+  # Transposition: type next two chars swapped, notice, delete both, retype.
+  if ($TransposeRate -gt 0 -and $idx + 1 -lt $chars.Length -and $rnd.NextDouble() -lt $TransposeRate) {
+    $nk = [string]$chars[$idx + 1]
+    if ($table.ContainsKey($nk) -and $key -match '[A-Za-z]' -and $nk -match '[A-Za-z]') {
+      $v2 = $table[$nk]; Send-Key $v2[0] $v2[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); Pause-Gap $prevKey $nk
+      $v1 = $table[$key]; Send-Key $v1[0] $v1[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+      Start-Sleep -Milliseconds $rnd.Next(200, 520)
+      Send-Key 0x08 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+      Start-Sleep -Milliseconds $rnd.Next(60, 150)
+      Send-Key 0x08 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+      Start-Sleep -Milliseconds $rnd.Next(90, 220)
+      Send-Key $v1[0] $v1[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1)); Pause-Gap $prevKey $key
+      Send-Key $v2[0] $v2[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+      $typed += 2; $transposes++; $prevKey = $nk; $idx++
+      Pause-Gap $key $nk
+      continue
+    }
+  }
+
+  # Human slip: hit a QWERTY neighbour of the intended key, notice it,
+  # backspace, retype. The text that ends up in the field is still exact.
   if ($rnd.NextDouble() -lt $TypoRate) {
-    $neighbours = @('a','e','i','o','u','s','t','n','r','l')
-    $wrong = $neighbours[$rnd.Next($neighbours.Length)]
-    $wv = $table[$wrong]
-    Send-Key $wv[0] $wv[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
-    Start-Sleep -Milliseconds $rnd.Next(180, 520)
-    Send-Key 0x08 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1))   # Backspace
-    Start-Sleep -Milliseconds $rnd.Next(90, 220)
-    $hold = $rnd.Next($HoldMsMin, $HoldMsMax + 1)
+    $lower = $key.ToLower()
+    if ($adjacent.ContainsKey($lower)) {
+      $cands = $adjacent[$lower]
+      $wrongLower = $cands[$rnd.Next($cands.Length)]
+      # Preserve case of the intended key.
+      $wrong = if ($key -cmatch '[A-Z]') { $wrongLower.ToUpper() } else { $wrongLower }
+      if ($table.ContainsKey($wrong)) {
+        $wv = $table[$wrong]
+        Send-Key $wv[0] $wv[1] ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+        Start-Sleep -Milliseconds $rnd.Next(180, 520)
+        Send-Key 0x08 $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1))   # Backspace
+        Start-Sleep -Milliseconds $rnd.Next(90, 220)
+        $hold = $rnd.Next($HoldMsMin, $HoldMsMax + 1)
+        $typos++
+      }
+    }
   }
 
   $v = $table[$key]
   Send-Key $v[0] $v[1] $hold
   $typed++
-  Pause-Gap
+  Pause-Gap $prevKey $key
+  $prevKey = $key
+  $sinceBurst++
+
+  # Sentence boundary: longer planning pause after . ! ?
+  if ($key -match '[.!?]') { Start-Sleep -Milliseconds $rnd.Next(400, 900); $sinceBurst = 0; $nextBurstAt = $rnd.Next($BurstMin, $BurstMax + 1) }
+  elseif ($sinceBurst -ge $nextBurstAt) {
+    Start-Sleep -Milliseconds $rnd.Next(300, 800)  # burst-pause: chunk typing
+    $bursts++; $sinceBurst = 0; $nextBurstAt = $rnd.Next($BurstMin, $BurstMax + 1)
+  }
 }
 
 $ms = [int]([DateTime]::UtcNow - $t0).TotalMilliseconds
-Write-Output "typed $typed char(s) in ${ms}ms (~$([Math]::Round($ms / [Math]::Max(1,$typed),0))ms/char)"
+Write-Output "typed $typed char(s) in ${ms}ms (~$([Math]::Round($ms / [Math]::Max(1,$typed),0))ms/char) typos=$typos transposes=$transposes bursts=$bursts seed=$Seed"
 if ($unsupported.Count -gt 0) {
   $uniq = ($unsupported | Select-Object -Unique) -join ''
-  Write-Output "SKIPPED $($unsupported.Count) char(s) not in the US table: '$uniq' (CJK and other non-ASCII: use clipboard paste instead)"
+  Write-Output "SKIPPED $($unsupported.Count) char(s) not in the US table: '$uniq' (CJK goes through the OS IME - feed the zhuyin readings like 'w961o3', not the characters; otherwise paste)"
 }

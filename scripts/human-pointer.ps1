@@ -11,8 +11,21 @@ Why the API choice matters (measured on Windows, Chrome 155, bsk 0.3.2):
 All of them only reach the page while the Agent Window is the foreground window.
 mouse_event delivers nothing to a background window, so this script locates the
 Agent Window, forces it to the foreground, and verifies it got there before
-moving anything. Measured result of one run: 37 mousemove events over ~640 ms,
-with movementX/Y deltas varying from 2 to 22 px and 5-49 ms between samples.
+moving anything. Chrome coalesces the stream, so a run yields fewer events than
+the script sends - 43-52 `mousemove` events over 1.2-3.1 s at the defaults - and
+the largest gaps land mid-path where the pointer is fastest, not at the ends.
+
+`-Click` and `-Drag` need one thing done from the page first: bsk's
+`browser-skill-overlay` sits in the hit-test path, so the button press lands on
+the overlay and the page never sees it. Hide it once per page (and again after
+every `bsk screenshot`) with:
+
+  bsk evaluate --session <id> \
+    'document.querySelector("browser-skill-overlay").setAttribute("data-bsk-capture-hidden","")'
+
+Moving needs no such step - only the press is hit-tested. With the overlay
+hidden, a measured `-Click` run produced 43-52 mousemove events over 1.2-3.1 s,
+a 66-132 ms hold, pressure 0.5 while the button was down, and 0 untrusted events.
 
 Coordinates are CSS viewport pixels. The OS works in physical pixels and the two
 differ whenever the display is scaled or the page is zoomed, so the mapping is
@@ -40,12 +53,16 @@ param(
   [double]$StartCssX = -1,
   [double]$StartCssY = -1,
   [int]$DurationMs = 0,          # 0 = randomise 350-900 ms by distance
-  [double]$JitterPx = 1.2,       # per-step random offset
+  [double]$JitterPx = 1.2,       # legacy white-noise per-step offset (kept for compat)
+  [double]$TremorPx = 1.6,       # correlated hand-tremor amplitude (OU random walk)
   [double]$PauseChance = 0.06,   # probability of a micro-pause per step
   [int]$MaxPauseMs = 70,         # upper bound of a micro-pause
   [switch]$NoOvershoot,
   [switch]$Click,
+  [switch]$Drag,                 # hold button during the path (drag-and-drop / slider)
   [ValidateSet('left', 'right', 'middle')][string]$ClickButton = 'left',
+  [int]$DwellMsMin = 80,         # pre-click dwell: human pauses on target before pressing
+  [int]$DwellMsMax = 250,
   [int]$Seed = 0,                # 0 = time-based seed
   [switch]$ListWindows
 )
@@ -202,6 +219,12 @@ $endPX = To-PhysicalX $EndCssX; $endPY = To-PhysicalY $EndCssY
 $dx = $endPX - $startPX; $dy = $endPY - $startPY
 $dist = [Math]::Sqrt($dx * $dx + $dy * $dy)
 
+switch ($ClickButton) {
+  'left'   { $downCode = 0x0002; $upCode = 0x0004 }
+  'right'  { $downCode = 0x0008; $upCode = 0x0010 }
+  'middle' { $downCode = 0x0020; $upCode = 0x0040 }
+}
+
 if ($dist -lt 3) {
   Move-Physical $endPX $endPY
   Write-Output "already there ($startPX,$startPY) -> ($endPX,$endPY)"
@@ -227,6 +250,10 @@ else {
     $m = 1 - $t
     return $m*$m*$m*$a + 3*$m*$m*$t*$b + 3*$m*$t*$t*$c + $t*$t*$t*$d
   }
+  function MinJerk([double]$t) {
+    # Minimum-jerk velocity profile: bell-shaped speed, gentle landing.
+    return 10*$t*$t*$t - 15*$t*$t*$t*$t + 6*$t*$t*$t*$t*$t
+  }
 
   $steps = [int]([Math]::Max(18, [Math]::Min(140, $dist / 4)))
 
@@ -237,12 +264,20 @@ else {
     $ox += ($dx / $dist) * $oMag; $oy += ($dy / $dist) * $oMag
   }
 
+  # Correlated hand tremor (Ornstein-Uhlenbeck walk) + small white jitter.
+  $trx = 0.0; $try = 0.0
+
+  if ($Drag) {
+    Move-Physical $startPX $startPY
+    Start-Sleep -Milliseconds $rnd.Next(120, 280)  # grip pause before drag
+    [H.U]::mouse_event($downCode, 0, 0, 0, [System.UIntPtr]::Zero)
+    Start-Sleep -Milliseconds $rnd.Next(80, 180)
+  }
+
   $t0 = [DateTime]::UtcNow
   for ($i = 0; $i -le $steps; $i++) {
     $t = $i / $steps
-    # ease-in-out (smoothstep-like), slightly asymmetric: quick start, gentle landing
-    $e = $t * $t * (3 - 2 * $t); $e = $e * (0.85 + 0.3 * $t)
-    if ($e -gt 1) { $e = 1 }
+    $e = MinJerk $t
 
     if ($e -lt 0.75) {
       $bx = B $e $startPX $c1x $c2x $ox; $by = B $e $startPY $c1y $c2y $oy
@@ -256,8 +291,17 @@ else {
       $by = ((1-$q)*(1-$q)*$sy + 2*(1-$q)*$q*$qy + $q*$q*$endPY)
     }
 
-    $cx = $bx + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx
-    $cy = $by + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx
+    # OU update: mean-reverting drift plus Gaussian kick.
+    $u1 = [Math]::Max(1e-6, $rnd.NextDouble()); $u2 = $rnd.NextDouble()
+    $gauss = [Math]::Sqrt(-2.0 * [Math]::Log($u1)) * [Math]::Cos(2.0 * [Math]::PI * $u2)
+    $u3 = [Math]::Max(1e-6, $rnd.NextDouble()); $u4 = $rnd.NextDouble()
+    $gauss2 = [Math]::Sqrt(-2.0 * [Math]::Log($u3)) * [Math]::Cos(2.0 * [Math]::PI * $u4)
+    $trx = $trx * 0.85 + $gauss * $TremorPx * 0.35
+    $try = $try * 0.85 + $gauss2 * $TremorPx * 0.35
+    if ($trx -gt 6) { $trx = 6 }; if ($trx -lt -6) { $trx = -6 }
+    if ($try -gt 6) { $try = 6 }; if ($try -lt -6) { $try = -6 }
+    $cx = $bx + $trx + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx * 0.5
+    $cy = $by + $try + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx * 0.5
     $cx = [Math]::Max($vsX, [Math]::Min($vsX + $scrW - 1, $cx))
     $cy = [Math]::Max($vsY, [Math]::Min($vsY + $scrH - 1, $cy))
     Move-Physical ([int][Math]::Round($cx)) ([int][Math]::Round($cy))
@@ -276,20 +320,21 @@ else {
   }
 
   Move-Physical $endPX $endPY
-  Write-Output "path css=($([int]$StartCssX),$([int]$StartCssY))->($([int]$EndCssX),$([int]$EndCssY)) physical=($startPX,$startPY)->($endPX,$endPY) steps=$steps ms=$([int]([DateTime]::UtcNow - $t0).TotalMilliseconds)"
+  Write-Output "path css=($([int]$StartCssX),$([int]$StartCssY))->($([int]$EndCssX),$([int]$EndCssY)) physical=($startPX,$startPY)->($endPX,$endPY) steps=$steps ms=$([int]([DateTime]::UtcNow - $t0).TotalMilliseconds) profile=minjerk tremor=$TremorPx"
 }
 
-if ($Click) {
-  # Click at the OS level too. A CDP click would dispatch its own mouseMoved
-  # first, which can contradict the trajectory just drawn.
-  switch ($ClickButton) {
-    'left'   { $down = 0x0002; $up = 0x0004 }
-    'right'  { $down = 0x0008; $up = 0x0010 }
-    'middle' { $down = 0x0020; $up = 0x0040 }
-  }
+if ($Drag) {
+  Start-Sleep -Milliseconds $rnd.Next(80, 200)  # settle at drop point while holding
+  [H.U]::mouse_event($upCode, 0, 0, 0, [System.UIntPtr]::Zero)
+  Write-Output "drag button=$ClickButton released at=($endPX,$endPY)"
+}
+elseif ($Click) {
+  # Human dwell: pause on target before pressing, then hold like a finger.
+  $dwell = $rnd.Next($DwellMsMin, $DwellMsMax + 1)
+  Start-Sleep -Milliseconds $dwell
   $holdMs = $rnd.Next(45, 130)
-  [H.U]::mouse_event($down, 0, 0, 0, [System.UIntPtr]::Zero)
+  [H.U]::mouse_event($downCode, 0, 0, 0, [System.UIntPtr]::Zero)
   Start-Sleep -Milliseconds $holdMs
-  [H.U]::mouse_event($up, 0, 0, 0, [System.UIntPtr]::Zero)
-  Write-Output "click button=$ClickButton hold=${holdMs}ms"
+  [H.U]::mouse_event($upCode, 0, 0, 0, [System.UIntPtr]::Zero)
+  Write-Output "click button=$ClickButton dwell=${dwell}ms hold=${holdMs}ms"
 }

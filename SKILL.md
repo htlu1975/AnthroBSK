@@ -2,11 +2,11 @@
 name: anthrobsk
 description: |
   AnthroBSK - drive the user's logged-in Chromium browser the way a person
-  does, with simulated mouse and keyboard actions: Bezier cursor trajectories
-  with random pauses, real clicks, hover, wheel scroll, key-by-key typing and
-  Tab/Enter navigation. Use for reading pages, filling forms, scraping data,
-  operating tabs, testing a UI, or debugging a website. Requires the bsk CLI
-  (Tencent BrowserSkill) and its browser extension.
+  does, with simulated mouse and keyboard actions: human-like cursor
+  trajectories with random pauses, real clicks, hover, wheel scroll, key-by-key
+  typing and Tab/Enter navigation. Use for reading pages, filling forms,
+  scraping data, operating tabs, testing a UI, or debugging a website. Requires
+  the bsk CLI (Tencent BrowserSkill) and its browser extension.
 ---
 
 # AnthroBSK Skill
@@ -98,10 +98,27 @@ read `bsk --help` or `bsk <command...> --help`; do not guess.
 When following a trace, use its semantic targets and values in order, not its old
 refs. Stop at the requested goal; a trace grants no additional authorization.
 
+If the task needs OS-level pointing (`human-pointer.ps1 -Click` / `-Drag`) or CJK
+through the real IME, hide bsk's overlay first - one call, and re-apply it after
+every `screenshot`:
+
+```sh
+bsk evaluate --session <id> \
+  'document.querySelector("browser-skill-overlay").setAttribute("data-bsk-capture-hidden","")'
+```
+
+That is a deliberate trade-off: the overlay is the user's only on-page signal that
+an agent is driving their browser, so say in the task summary that it was hidden
+and why. Details and the measured effect are in "The overlay, and how to get OS
+input through to the page" below.
+
 ## Mouse actions
 
 `click` and `hover` given a ref or selector dispatch real mouse events at the
-element's position; they are the ordinary way to point at HTML controls.
+element's position; they are the ordinary way to point at HTML controls. They
+also work while the overlay is up, because they target the element directly
+rather than hit-testing. Only OS-level pointing needs the overlay hidden first -
+see "The overlay, and how to get OS input through to the page" below.
 
 | Need | Command |
 | --- | --- |
@@ -121,6 +138,18 @@ element's position; they are the ordinary way to point at HTML controls.
 - Prefer clicking where the human-relevant element is, found via `observe` refs;
   obtain fresh refs before acting on screenshot or HTML findings.
 - Space/Enter also "press" many controls once focused - use them when a person would.
+- **The wheel scrolls, but pages do not see it.** Measured with real input: a
+  `window` capture listener for `wheel` fires with `isTrusted: true`, while a
+  `document` capture listener and the target element's own listener never fire,
+  even though `scrollTop` changes. Something stops propagation between `window`
+  and `document`. Do not build a flow that depends on the page's own `wheel`
+  handler - verify the scroll position instead.
+- **OS-level wheel injection does nothing here.** `human-wheel.ps1` sends
+  `mouse_event(MOUSEEVENTF_WHEEL)`; on this machine no variant produced any
+  scroll: `±120`, `-1200`, `SetCursorPos` first, and even `keybd_event` PageDown
+  were all no-ops while the window was verified foreground throughout. Only
+  `bsk wheel` actually scrolls. Treat `human-wheel.ps1` as best-effort, and check
+  the scroll position afterwards rather than trusting its success line.
 - **If a `click` appears to do nothing, reach for the keyboard.** On a GitHub
   settings page, `click @e42` on a submit button reported
   `at=(577.2, 227.3)` while the button's real centre was `(831.2, 227.3)` - 254 px
@@ -170,8 +199,11 @@ page. Do not substitute the others:
 | `SendInput(MOUSEEVENTF_MOVE)` | **no** | no - returns 1 and is silently discarded |
 | `mouse_event(MOVE\|ABSOLUTE\|VIRTUALDESK)` | yes | **yes** |
 
-Two further requirements, both verified:
+Three further requirements, all verified:
 
+- **The overlay must be hidden if the path ends in a click.** Moving is
+  unaffected, but the button press is hit-tested, so with the overlay up it lands
+  on the overlay. Hide it first (see below) whenever you use `-Click` or `-Drag`.
 - **The Agent Window must be the foreground window.** The same `mouse_event`
   call delivers nothing while another window is in front. The script forces
   focus with `AttachThreadInput` + `SetForegroundWindow` and *verifies* it took,
@@ -186,46 +218,98 @@ Two further requirements, both verified:
   later moved to a monitor where the scale was 1.5. The script re-measures every
   run.
 
-A verified run produced 54 `mousemove` events over ~1.2 s, with `movementX/Y`
-varying from 2 to 22 px and 5-49 ms between samples - a real trajectory rather
-than a teleport.
+A verified run produced 43-52 `mousemove` events over 1.2-3.1 s with correlated
+(Ornstein-Uhlenbeck) tremor - a real trajectory rather than a teleport. Chrome
+coalesces the stream, so the largest gaps land mid-path where the pointer is
+fastest, not at the ends.
 
-#### The Agent Window is input-blocked by bsk's own overlay
+#### The overlay, and how to get OS input through to the page
 
-bsk injects `browser-skill-overlay` into the page's main world: `position:
-fixed`, `z-index: 2147483647`, `pointer-events: auto`, covering the whole
-viewport, carrying `data-bsk-overlay`, `data-bsk-overlay-surface` and
-`data-bsk-overlay-blocking` attributes plus a shadow root. Three consequences:
+bsk injects `browser-skill-overlay` as a **direct child of `<html>`** (not
+`<body>`), carrying `aria-hidden`, `data-bsk-overlay`,
+`data-bsk-overlay-surface` and `data-bsk-overlay-blocking`, plus a shadow root.
+It has **no inline style** - everything comes from rules inside that shadow root,
+which is the extension's own CSS contract:
 
-- **OS-level clicks hit the overlay, not the page.**
-  `document.elementFromPoint(x, y)` returns `BROWSER-SKILL-OVERLAY` and the real
-  control receives no `mousedown`/`click`. So split the work: use `mouse_event`
-  for the *path*, then `bsk click @ref` for the *click*. The CLI's click targets
-  the element directly and stays consistent with the trajectory's final point.
-  Measured on a GitHub upload page: the overlay's bounding rect was exactly the
-  viewport (`0,0 1707x769`), and sampling *two* points - the commit-summary input
-  at `(878, 410)` and the submit button at `(370, 640)` - both returned
-  `BROWSER-SKILL-OVERLAY` as the topmost element. An `human-pointer.ps1 -Click`
-  aimed at the input moved the cursor to the right physical pixel and held the
-  button for 95 ms, yet `document.activeElement` stayed on the previously focused
-  element: the click was swallowed end to end.
-- **Do not try to remove or neutralise it.** It is re-injected automatically,
-  and its `:host{all:initial !important}` lives inside a CSS `@layer`, so both an
-  inline `pointer-events: none !important` and a rule injected into its shadow
-  root lose the cascade - unlayered `!important` is the weakest kind of
-  important declaration.
-- **It is a fingerprint.** Any page can run
-  `document.querySelector('browser-skill-overlay')` and know an agent is
-  driving. Read "What this skill is not" in the README before promising stealth.
+```css
+:host { all: initial !important; }
+:host([data-bsk-overlay-surface]) { ... pointer-events: none !important; ... }
+:host([data-bsk-overlay-surface][data-bsk-overlay-blocking]) { pointer-events: auto !important; }
+:host([data-bsk-capture-hidden]) { display: none !important; }
+```
 
-**Verified limitation - click timing (measured):** one `click` reaches the page
-as a single `mousemove`, then `mousedown` 2-4 ms later, then `mouseup` 0.8-2 ms
-after that; the whole gesture completes in about 6 ms and `pointermove` carries
-`pressure: 0` even while a button is down. A human press holds the button for
-roughly 60-120 ms after moving for 80-300 ms. These are properties of the CLI's
-own dispatch: `click` has no hold-duration or pre-move option. `human-pointer.ps1
--Click` does hold the button for a randomized 45-130 ms, but the overlay above
-means its click lands on the overlay rather than the control.
+**The extension ships its own hiding switch.** Set `data-bsk-capture-hidden` and
+the overlay goes `display: none`, hit-testing falls through to the real page, and
+OS-level input starts working:
+
+```sh
+bsk evaluate --session <id> \
+  'document.querySelector("browser-skill-overlay").setAttribute("data-bsk-capture-hidden","")'
+```
+
+Measured effect: `elementFromPoint` flips from `BROWSER-SKILL-OVERLAY` to the
+real element, `human-pointer.ps1 -Click` at the same coordinates moves
+`document.activeElement` to the intended input, and a click on a `<button>`
+increments that button's own handler. Nothing about bsk's own commands changes -
+`click`, `press`, `hover` and `observe` all still work with the overlay hidden.
+
+**Only `screenshot` puts it back.** `click`, `press`, `hover` and `observe` leave
+it hidden; `screenshot` clears the attribute and restores `display: block`
+(its capture flow hides the overlay itself, then un-hides it). Re-apply the
+attribute after every `screenshot` and after every navigation.
+
+##### Why nothing else works
+
+- **Do not remove the element.** The extension re-injects it. Removing it from a
+  `MutationObserver` loop livelocks the renderer - the tab hung hard enough that
+  it had to be closed.
+- **`pointer-events: none` cannot be forced from the page.** Four attempts all
+  failed with the computed value staying `auto`: an inline
+  `style.setProperty('pointer-events','none','important')` (the attribute is
+  written but the computed value never changes - a genuine cascade loss, not a
+  stripped attribute), a `@layer` declared ahead of every other stylesheet, a
+  rule appended inside the shadow root, and removing `data-bsk-overlay-blocking`
+  on its own. The reason is the encapsulation rule: for **important**
+  declarations the *inner* context wins, so a shadow-tree `:host { ... !important }`
+  beats every document-origin important declaration. Removing
+  `data-bsk-overlay-blocking` does flip the host to `pointer-events: none`, but
+  the shadow root's inner blocker element re-enables hit-testing for itself, so
+  `elementFromPoint` still returns the overlay.
+- **It is still a fingerprint.** `data-bsk-capture-hidden` hides the overlay from
+  the *user and the hit test*, not from the DOM. Any page can still run
+  `document.querySelector('browser-skill-overlay')` and know an agent is driving.
+  Read "What this is not" in the README before promising stealth.
+- **Hiding it costs the user their indicator.** The overlay is how a person sees
+  that an agent is driving their browser. Hide it only when OS-level input is
+  actually needed, and mention it in the task summary.
+
+#### Click timing: OS clicks close the gap
+
+With the overlay hidden, `human-pointer.ps1 -Click` produces a click a page
+cannot tell from a person's:
+
+| | `bsk click` | `human-pointer.ps1 -Click`, overlay hidden |
+| --- | --- | --- |
+| approach | 1 coalesced `mousemove` | 43-52 `mousemove` over 1.2-3.1 s |
+| dwell before press | none | 80-250 ms |
+| button hold | ~6 ms | 66-132 ms |
+| `pointerdown` pressure | 0 | 0.5 |
+| `pointermove` while down | 0 | 0.5 |
+| untrusted events | 0 | 0 |
+
+One measured run: 151 events, `holdMs` 104.5, `pathMs` 3104.8, 43 `mousemove`
+with per-step deltas 0-50 px, and a `<button>` handler firing once.
+
+Without the overlay hidden the click is swallowed end to end: on a GitHub upload
+page the cursor reached the correct physical pixel and held the button for 95 ms,
+yet `document.activeElement` never moved.
+
+**Verified limitation - `bsk click` timing (measured):** one `click` reaches the
+page as a single `mousemove`, then `mousedown` 2-4 ms later, then `mouseup`
+0.8-2 ms after that; the whole gesture completes in about 6 ms and `pointermove`
+carries `pressure: 0` even while a button is down. `click` exposes no
+hold-duration or pre-move option, so when you have to fall back to it the timing
+gap stays.
 
 **Verified limitation - pacing granularity (measured):** every `bsk` call starts
 a process and costs roughly 0.9-1.2 s, which dominates any per-key `wait-ms`.
@@ -253,7 +337,7 @@ value with the keyboard, then press keys one at a time.
 | Select-all, then clear | `bsk press Ctrl+A --session <id>` then `bsk press Delete --session <id>` (or `Backspace`) |
 | Type one ASCII character | `bsk press a --session <id>` |
 | Type an ASCII string with real rhythm | `& "<skill-dir>\scripts\human-keys.ps1" -WindowTitleLike "<page title>" -Text "hello world"` |
-| Insert CJK / non-ASCII text | put it on the clipboard, then `bsk press Ctrl+V --session <id>` |
+| Insert CJK / non-ASCII text | `human-keys.ps1` through the OS IME, or put it on the clipboard and `bsk press Ctrl+V --session <id>` |
 | Special/combo keys | `bsk press Enter --session <id>`, `Tab`, `Escape`, `ArrowDown`, `Ctrl+C`, ... |
 | Hold a key | `bsk press x --hold-ms 300 --session <id>` |
 | Key on a specific element | `bsk press Enter --ref @e3 --session <id>` (focuses first) |
@@ -264,8 +348,9 @@ value with the keyboard, then press keys one at a time.
 | Input | Channel | Why |
 | --- | --- | --- |
 | ASCII, a few keys | `bsk press <ch>` | accurate event shape: `key`/`code`/`keyCode`, `keypress`, `insertText` |
-| ASCII, rhythm matters | `scripts/human-keys.ps1` | real OS keystrokes, ~190-230 ms per key with jitter |
-| CJK / any non-ASCII | **clipboard paste** | see below |
+| ASCII, rhythm matters | `scripts/human-keys.ps1` | real OS keystrokes, log-normal gaps, burst pauses, bigram speedups |
+| CJK, the composition trail matters | `scripts/human-keys.ps1` through the OS IME | genuine `compositionstart`/`update`/`end`; needs the zhuyin reading |
+| CJK, the trail does not matter | clipboard paste | simpler; the page sees one `insertFromPaste` |
 
 `bsk press` on ASCII is correct - `key: "a"`, `code: "KeyA"`, `keyCode: 65`,
 `keypress` 97, and an `insertText` input event - and `--hold-ms` is honoured.
@@ -275,17 +360,19 @@ between consecutive keys; that gap is itself a signature.
 `scripts/human-keys.ps1` sends `keybd_event` keystrokes with per-key random hold
 and gap, plus an optional human slip (a wrong neighbour key, a pause, Backspace,
 retype) that still leaves exactly the intended text. It needs the Agent Window
-in the foreground and the field focused first - and because the overlay eats OS
-clicks (see above), focus it with `bsk click --selector '<css>'`, never with
-`human-pointer.ps1 -Click`. It refuses to type if it cannot take the foreground.
+in the foreground and the field focused first - focus it with
+`bsk click --selector '<css>'`, which targets the element directly and works
+whether or not the overlay is hidden. It refuses to type if it cannot take the
+foreground.
 
-#### The overlay blocks the mouse but not the keyboard (measured)
+#### The keyboard is unaffected by the overlay (measured)
 
 The overlay sits in the hit-testing path, so it swallows OS *clicks*, but
 keystrokes go to whatever element holds focus and never pass through
-hit-testing. That asymmetry is the practical recipe: **focus with `bsk click`,
-type with `human-keys.ps1`.** You get a real OS keystroke stream with zero
-overlay interference.
+hit-testing. OS typing therefore needs no overlay change at all: **focus with
+`bsk click`, type with `human-keys.ps1`.** You get a real OS keystroke stream
+with zero overlay interference - and this is also the only channel that reaches
+the IME.
 
 A live run on a GitHub commit form, with listeners attached to the focused
 input, produced **265 events, 100% `isTrusted: true`, 0 untrusted**:
@@ -318,14 +405,48 @@ not from trust. What actually differs: OS keystrokes carry real hold durations
 and a human-shaped inter-key rhythm (~231 ms/char measured, jittered), while
 `bsk press` is locked to roughly 660 ms per key by the daemon round trip.
 
-**CJK: paste, do not type.** `bsk press 測` emits `keydown` with `code: ""` and
-`keyCode: 0`, puts the code point in `keypress.keyCode`, and produces no
-`compositionstart`/`compositionupdate`/`compositionend` while `isComposing`
-stays `false` - a page can tell it never came from an IME. OS-level keystrokes
-do not close that either: driving a real IME means selecting candidates, and the
-layout handle resolves to `0x0` in this context so character translation is
-unreliable. A paste emits a genuine `insertFromPaste`, which is exactly what a
-human paste emits:
+**CJK: you can drive the real IME.** `bsk press 測` cannot - it emits `keydown`
+with `code: ""` and `keyCode: 0`, puts the code point in `keypress.keyCode`, and
+produces no `compositionstart`/`compositionupdate`/`compositionend` while
+`isComposing` stays `false`. But OS-level keystrokes *do* reach the installed
+IME, so `human-keys.ps1` can type through it and produce a genuine composition
+stream:
+
+```
+keydown  key="Process" code="KeyW" keyCode=229
+compositionstart  data=""
+compositionupdate data="ㄊ"
+beforeinput/input  inputType="insertCompositionText" data="ㄊ"
+keyup    key="Process" keyCode=229      <- two keyups per key
+keyup    key="w" code="KeyW" keyCode=87
+...
+compositionupdate data="ㄊㄞ"
+compositionupdate data="台"
+```
+
+Measured on this machine: Windows with Microsoft Bopomofo as the active input
+(TIP `{B115690A-EA02-48D5-A231-E3578D2F80}`, language `zh-Hant-TW`). Typing
+`w961o3` - ㄊㄞˊ then ㄅㄟˇ on the standard zhuyin layout - put `台北` in the
+field, with 6 `compositionupdate` events, `isComposing: true` throughout, and
+**0 untrusted events**. The tone mark auto-commits, so **no Space is needed**.
+
+Three things to get right:
+
+1. **CDP bypasses the IME.** Verified directly: with the IME in Chinese mode,
+   `bsk press a` inserted a literal `a` and started no composition, while an OS
+   `keybd_event` for the same key produced ㄇ. `bsk press` can never type CJK
+   through the IME - it is a separate, IME-free channel.
+2. **The IME mode is sticky per window.** After a CJK run the IME stays in
+   Chinese mode and the next ASCII run is silently converted to zhuyin
+   (measured: `the quick brown fox` came back as bopomofo). Toggle back with a
+   single **OS-level** `Shift` before typing ASCII - verified: after one Shift
+   the same string typed correctly, `keypress: 19`, `isComposing` never true.
+   `bsk press` cannot do this toggle either, for the same reason as (1).
+3. **You need the zhuyin reading of each character.** That is the real cost, and
+   why paste is still the sensible default. Type CJK through the IME when the
+   readings are known and the composition trail matters; otherwise paste.
+
+A paste is simpler and still legitimate:
 
 ```sh
 printf '%s' '台北 天氣' | clip.exe      # Windows: put the text on the clipboard
@@ -335,6 +456,11 @@ bsk press Ctrl+V --session <id>        # page sees one insertFromPaste
 Verified: real `press` events for `a` and `b` plus a pasted `台北天氣` arrive as
 `ab台北天氣`, the paste landing as a single `insertFromPaste` after one
 `keydown V`. For mixed text, type the ASCII runs and paste the CJK runs.
+
+**Verified quirk - exactly one untrusted event.** Driving the IME produces one
+`isTrusted: false` event: a `compositionend` fired when focus leaves the field.
+Every other event in the same run was trusted. If a page checks
+`compositionend.isTrusted`, that is where it shows.
 
 `press` accepts one BMP character per call; characters outside the Basic
 Multilingual Plane (emoji, CJK Extension B and above) are rejected with
@@ -354,8 +480,9 @@ bsk wait-ms $(((RANDOM % 500) + 300))                  # brief pause before subm
 bsk press Enter --session <id>        # submit the way a person does
 ```
 
-For any non-ASCII run inside that string, break out and paste it (see the CJK
-recipe above) rather than pressing it character by character.
+For any non-ASCII run inside that string, either drive the OS IME with
+`human-keys.ps1` or break out and paste it (see the CJK recipe above) rather
+than pressing it character by character.
 
 - `Tab` / `Shift+Tab` move focus between controls; `Escape` closes popovers;
   arrow keys move within pages, lists and menus - prefer keyboard traversal
@@ -394,22 +521,37 @@ A task may need more than one reference as it progresses.
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |
+| Choosing input channel (click vs path vs type vs paste vs wheel vs drag) | [Decision tree](references/decision-tree.md) |
+| Proposing CLI/extension fixes upstream (overlay, click timing, batch type, wheel, waits) | [Upstream proposals](references/upstream-proposals.md) |
+| Verifying a change (offline checks + live probe steps) | [tests/README.md](tests/README.md) |
 
 ## Resources
 
 - `scripts/human-pointer.ps1` - drives the OS cursor along a randomized cubic
-  Bezier (speed easing, jitter, overshoot-and-correct, micro-pauses) so the page
-  observes a real `mousemove` trajectory; optionally clicks at the end.
+  Bezier (minimum-jerk profile, correlated OU tremor, overshoot-and-correct,
+  micro-pauses) so the page observes a real `mousemove` trajectory; `-Click`
+  dwells 80-250 ms then holds 45-130 ms, `-Drag` holds the button during the
+  path for drag-and-drop/sliders.
   `-ListWindows` prints candidate windows and their viewport rects without
   moving anything. Output is one line for the window, then one for the path:
   `window hwnd=... viewport=... scale=(..) foreground=True` /
   `path css=(x,y)->(x,y) physical=(x,y)->(x,y) steps=N ms=T`.
 - `scripts/human-keys.ps1` - types ASCII with `keybd_event` at ~190-230 ms per
-  key with jitter (191 ms/char on an idle run, 231 ms/char on a busy one), plus
-  optional slip-and-correct. `-ListWindows` lists targets.
+  key with log-normal jitter, frequent-bigram speedups, word-boundary pauses,
+  burst pauses every 8-15 chars and sentence pauses, plus QWERTY-adjacent
+  slip-and-correct and rare transposition fixes (output reports
+  `typos=/transposes=/bursts=`). Because it is real OS input it also reaches the
+  installed IME, so the same script types CJK when you feed it the zhuyin
+  readings. `-ListWindows` lists targets.
   Pair it with `bsk click --selector` for focus: the overlay swallows OS clicks
   but never sees OS keystrokes.
+- `scripts/human-wheel.ps1` - scrolls with a decaying 3-6 tick OS wheel burst
+  (40-140 ms gaps, coasting pause) intended to give the page multiple `wheel`
+  events instead of one jump. `-DeltaY > 0` scrolls down, `< 0` scrolls up.
+  **Not verified working:** OS wheel injection was a no-op on this machine in
+  every variant tried, and pages do not receive `wheel` DOM events anyway. Use
+  `bsk wheel` and confirm the scroll position yourself.
 
-Both require Windows PowerShell and are DPI-aware. Both exit non-zero with a
+All three require Windows PowerShell and are DPI-aware. All exit non-zero with a
 reason when they cannot take the foreground, instead of acting on the wrong
 window.
