@@ -81,5 +81,25 @@ else { Ok 'human-keys.ps1 no longer claims CJK is unsupported' }
 if ($keysRaw -match 'compositionstart') { Ok 'human-keys.ps1 documents the IME composition stream' }
 else { Bad 'human-keys.ps1 does not document the IME composition stream' }
 
+# The CJK reference carries the zhuyin key map and the sticky-IME reset; without
+# it the "feed readings, not characters" contract is unstated.
+$ime = Join-Path $root 'references/cjk-ime.md'
+if (Test-Path $ime) { Ok 'references/cjk-ime.md exists' } else { Bad 'references/cjk-ime.md missing' }
+if (Test-Path $ime) {
+  $imeText = Get-Content $ime -Raw
+  foreach ($need in @('ImeReset', 'w961o3', 'PageDown', 'zhuyin')) {
+    if ($imeText -match [regex]::Escape($need)) { Ok "cjk-ime.md documents '$need'" } else { Bad "cjk-ime.md missing '$need'" }
+  }
+}
+if ($skill -match 'references/cjk-ime\.md') { Ok 'SKILL.md links references/cjk-ime.md' }
+else { Bad 'SKILL.md does not link references/cjk-ime.md' }
+if ($keysRaw -match '\$ImeReset') { Ok 'human-keys.ps1 exposes the -ImeReset switch' }
+else { Bad 'human-keys.ps1 is missing the -ImeReset switch' }
+
+# Line endings are pinned so the repo cannot fork on a whole-file CRLF rewrite.
+$ga = Join-Path $root '.gitattributes'
+if ((Test-Path $ga) -and ((Get-Content $ga -Raw) -match 'eol=lf')) { Ok '.gitattributes pins eol=lf' }
+else { Bad '.gitattributes missing or does not pin eol=lf' }
+
 if ($fail -gt 0) { Write-Output "$fail check(s) FAILED"; exit 1 }
 Write-Output 'All offline checks passed.'
