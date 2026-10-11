@@ -149,18 +149,29 @@ see "The overlay, and how to get OS input through to the page" below.
 - Prefer clicking where the human-relevant element is, found via `observe` refs;
   obtain fresh refs before acting on screenshot or HTML findings.
 - Space/Enter also "press" many controls once focused - use them when a person would.
-- **The wheel scrolls, but pages do not see it.** Measured with real input: a
-  `window` capture listener for `wheel` fires with `isTrusted: true`, while a
+- **The wheel scrolls, but pages do not see it.** `bsk wheel` moves the scroll
+  position while the page's own `wheel` handlers stay silent: measured with real
+  input, a `window` capture listener fires with `isTrusted: true`, but a
   `document` capture listener and the target element's own listener never fire,
   even though `scrollTop` changes. Something stops propagation between `window`
   and `document`. Do not build a flow that depends on the page's own `wheel`
   handler - verify the scroll position instead.
-- **OS-level wheel injection does nothing here.** `human-wheel.ps1` sends
-  `mouse_event(MOUSEEVENTF_WHEEL)`; on this machine no variant produced any
-  scroll: `±120`, `-1200`, `SetCursorPos` first, and even `keybd_event` PageDown
-  were all no-ops while the window was verified foreground throughout. Only
-  `bsk wheel` actually scrolls. Treat `human-wheel.ps1` as best-effort, and check
-  the scroll position afterwards rather than trusting its success line.
+- **Real OS wheel reaches the page but cannot scroll it.** `human-wheel.ps1`
+  sends `mouse_event(MOUSEEVENTF_WHEEL)`. Windows delivers the wheel to the
+  window *under the cursor*, not the foreground window, so park the cursor over
+  the scroll target first (`-CssX/-CssY` + viewport size, or run
+  `human-pointer.ps1` there beforehand). Parked, with the overlay hidden, the
+  page then receives 4 genuine `wheel` events - `isTrusted: true`, correct
+  target, deltaY decaying 236 -> 166 -> 117 -> 82 - but they arrive with
+  `defaultPrevented: true` and the box does not move. The probe page has no such
+  handler, so the `preventDefault` (and the matching `stopPropagation`) come
+  from the extension in its isolated world at `window` capture, and it exempts
+  its own `bsk wheel`. So: use `bsk wheel` to scroll, and `human-wheel.ps1` when
+  you specifically need genuine `wheel` events inside the page. OS PageDown is a
+  different story - it works from the same OS path (verified scrolling
+  `scrollY` 93 -> 366 with a trusted `keydown`). If a navigation key looks dead,
+  the Chinese IME is most likely on and eating it; tap an OS Shift first (see
+  [CJK IME](references/cjk-ime.md)).
 - **If a `click` appears to do nothing, reach for the keyboard.** On a GitHub
   settings page, `click @e42` on a submit button reported
   `at=(577.2, 227.3)` while the button's real centre was `(831.2, 227.3)` - 254 px
@@ -449,10 +460,15 @@ Three things to get right:
    through the IME - it is a separate, IME-free channel.
 2. **The IME mode is sticky per window.** After a CJK run the IME stays in
    Chinese mode and the next ASCII run is silently converted to zhuyin
-   (measured: `the quick brown fox` came back as bopomofo). Toggle back with a
-   single **OS-level** `Shift` before typing ASCII - verified: after one Shift
-   the same string typed correctly, `keypress: 19`, `isComposing` never true.
-   `bsk press` cannot do this toggle either, for the same reason as (1).
+   (measured: `the quick brown fox` came back as bopomofo, and `abc` came back as
+   `ㄇ`/`ㄏ` while the script still reported `typos=0`). Navigation keys are
+   swallowed too: a real OS `PageDown` fired no `keydown` at all until a Shift
+   was tapped, after which it scrolled normally. Toggle back with a single
+   **OS-level** `Shift` before any ASCII or navigation-key run - `human-keys.ps1
+   ... -ImeReset` taps it at the end of a run, or send one yourself. Verified:
+   after one Shift the same string typed correctly, `keypress: 19`, `isComposing`
+   never true, and `z` arrived as `vk: 90`. `bsk press` cannot do this toggle
+   either, for the same reason as (1).
 3. **You need the zhuyin reading of each character.** That is the real cost, and
    why paste is still the sensible default. Type CJK through the IME when the
    readings are known and the composition trail matters; otherwise paste.
@@ -559,14 +575,14 @@ A task may need more than one reference as it progresses.
   lists targets.
   Pair it with `bsk click --selector` for focus: the overlay swallows OS clicks
   but never sees OS keystrokes.
-- `scripts/human-wheel.ps1` - scrolls with a decaying 3-6 tick OS wheel burst
-  (40-140 ms gaps, coasting pause) intended to give the page multiple `wheel`
-  events instead of one jump. `-DeltaY > 0` scrolls down, `< 0` scrolls up.
-  Windows sends the wheel to the window under the cursor, so park it over a
-  scrollable target first with `-CssX/-CssY` (+ viewport size), or position it
-  with `human-pointer.ps1` beforehand. Earlier no-op measurements skipped this
-  step and are unretested, not disproven - see `tests/README.md` step 7. Until
-  re-verified, confirm the scroll position yourself after wheeling.
+- `scripts/human-wheel.ps1` - emits a decaying 3-6 tick OS wheel burst (40-140 ms
+  gaps, coasting pause) so the page sees several `wheel` events instead of one
+  jump. `-DeltaY > 0` scrolls down, `< 0` scrolls up. Windows sends the wheel to
+  the window under the cursor, so park it over the scroll target first with
+  `-CssX/-CssY` (+ viewport size), or position it with `human-pointer.ps1`
+  beforehand. Parking fixes *delivery* (the page then gets 4 `isTrusted` wheel
+  events), but the extension `preventDefault`s them, so the page still does not
+  scroll - see the wheel bullet in Mouse actions. Use `bsk wheel` to scroll.
 
 All three require Windows PowerShell and are DPI-aware. All exit non-zero with a
 reason when they cannot take the foreground, instead of acting on the wrong

@@ -66,14 +66,18 @@ AnthroBSK 讓**互動模型**像真人。它**不會**讓產生出來的事件�
 - **藏起覆蓋層要付出代價。** `display: none` 意味著覆蓋層不再把頁面變暗，所以 `screenshot`
   不會拍到它——但頁面看起來也就正常了，因此截圖同樣無法證明覆蓋層是藏起來的。而且只有
   `screenshot` 會把屬性還原；`click`／`press`／`hover`／`observe` 都會讓它維持隱藏。
-- **作業系統滾輪注入在本機完全無效。** `human-wheel.ps1` 送出真實的
-  `mouse_event(MOUSEEVENTF_WHEEL)` tick，而且已驗證視窗是前景，但頁面一次都沒捲動。
-  四種變體（`±120`、`-1200`、先 `SetCursorPos`、`keybd_event PageDown`）全都沒有反應。
-  滾輪這條通道在這個環境不能用。
-- **頁面收不到 wheel 的 DOM 事件。** 當 `bsk` 真的捲動時，`wheel` 事件會到達 `window`
-  的 capture 階段（`isTrusted: true`），但在 `document` capture 之前、以及目標元素之前就被
-  擋下——`window.__wheelWinCap` 會增加，`__wheelDocCap` 卻始終是 0，即使 `scrollTop` 確實
-  改變了。可見 `window` 與 `document` 之間有東西呼叫了 `stopPropagation`。
+- **作業系統滾輪確實送達頁面，但頁面無法被它捲動。** `human-wheel.ps1` 送出
+  `mouse_event(MOUSEEVENTF_WHEEL)`；Windows 會把滾輪送給**游標下方**的視窗，而不是前景
+  視窗，所以要先把游標停在滾動目標上（`-CssX/-CssY` 加 viewport 尺寸）。停好、覆蓋層也
+  藏好之後，頁面確實收到 4 個真實的 `wheel` 事件——`isTrusted: true`、目標正確、deltaY 由
+  236 遞減到 166、117、82——但每一個都帶著 `defaultPrevented: true`，盒子還是不動。頁面
+  本身沒有任何 `wheel` 處理器，所以是擴充功能在 isolated world 的 `window` capture 階段對
+  真實滾輪呼叫了 `preventDefault`。先前「作業系統滾輪完全無效」的記錄是游標定位造成的
+  假象，在此更正。
+- **`bsk` 捲動時，頁面看不到那個 wheel 事件。** `bsk wheel` 會改變 `scrollTop`（實測
+  0 → 496），而且它的事件**沒有**被 `preventDefault`，但仍然到不了 `document` capture 或
+  目標元素——`window.__wheelWinCap` 會增加，`__wheelDocCap` 卻始終是 0，即使 `scrollTop`
+  確實改變了。可見 `window` 與 `document` 之間有東西呼叫了 `stopPropagation`。
 - **`isTrusted` 分不出這兩個通道。** 由 CDP 派送的輸入（`bsk press`、`bsk click`）同樣以
   `isTrusted: true` 抵達，跟 `keybd_event` 的輸出沒有差別，因為兩者都是經由瀏覽器真正的
   輸入管線進入 renderer。別把它當成隱蔽性的保證。真正有差的是**時序與事件形狀**（見上面
@@ -171,8 +175,8 @@ Agent 會依序：啟動 `bsk` 工作階段 → 導覽 → 用 `screenshot`／`o
   且 `isTrusted: true`。
 
 **未驗證**：WorkBuddy 以外的宿主、Windows 以外的作業系統、0.3.2 以外的 bsk 版本。
-`human-wheel.ps1` 能通過語法解析與離線檢查，但它的滾輪注入在本機是**已確認的 no-op**——
-不要依賴它。
+`human-wheel.ps1` 能通過語法解析與離線檢查；游標停好之後，它的 wheel 事件確實會到達
+頁面，但會被擴充功能 `preventDefault`，所以它不會捲動頁面——要捲動請用 `bsk wheel`。
 
 ## 已知限制
 
@@ -180,9 +184,10 @@ Agent 會依序：啟動 `bsk` 工作階段 → 導覽 → 用 `screenshot`／`o
   的 `data-bsk-capture-hidden` 配方，否則覆蓋層會把它吃掉。藏起來是刻意的表面取捨：頁面
   看起來變正常，所以截圖不會再拍到覆蓋層把頁面變暗。任何 `screenshot` 都會讓覆蓋層重新
   出現，所以截完要再藏一次。
-- **作業系統滾輪注入在本機無效。** `human-wheel.ps1` 雖然附在專案裡，但它的
-  `mouse_event(MOUSEEVENTF_WHEEL)` tick 就算已驗證視窗是前景，也完全不捲動；詳見
-  「仍然站不住的部分」。
+- **滾輪被拆成兩條通道。** `bsk wheel` 能捲動頁面，但頁面自己的 `wheel` 處理器不會執行；
+  `human-wheel.ps1` 會產生真實、頁面看得見的 `wheel` 事件，但被擴充功能 `preventDefault`
+  所以不捲動。看需求選：要位移用 `bsk wheel`，要頁面看得見的事件用 `human-wheel.ps1`。
+  詳見「仍然站不住的部分」。
 - 作業系統游標座標是 CSS viewport 像素，在執行時由視窗真實的 render widget 矩形換算而來。
   不要用 `devicePixelRatio` 代替：實測有一個視窗回報 `1.5`，但真實比例是 `1.0`；同一個
   視窗後來移到另一個螢幕，比例又變成 `1.5`。
@@ -192,10 +197,14 @@ Agent 會依序：啟動 `bsk` 工作階段 → 導覽 → 用 `screenshot`／`o
 - Chrome 會**合併** `mousemove`，所以頁面收到的事件比腳本送出的少：63–77 步產生 43–52 個
   事件。軌跡是真的，只是被抽稀了，而且最大的間隔落在路徑中段（指標最快的地方），不是
   兩端。
-- **輸入法模式是黏著的。** 打完中文之後，ASCII 按鍵會被轉成注音，直到在作業系統層按一次
-  Shift 才切回來。`bsk press Shift` 會被拒絕；腳本改用 `keybd_event` 送出。
+- **輸入法模式是黏著的，而且會靜默失敗。** 打完中文之後，ASCII 按鍵會被轉成注音（實測
+  `abc` 進到欄位變成 `ㄇ`／`ㄏ`，而腳本仍回報 `typos=0`），連導覽鍵也會被吃掉（真實的
+  OS `PageDown` 在按一次 Shift 之前完全不觸發 `keydown`）。用**作業系統層**的 Shift 切回
+  即可——`human-keys.ps1 -ImeReset` 會在收尾時送一次。`bsk press Shift` 會被拒絕；
+  腳本改用 `keybd_event` 送出。
 - 像素點擊（`--image-x`／`--image-y`）在 `bsk` 中僅限 Canvas；HTML 目標要用 ref 或
-  CSS 選擇器點擊，這仍然會送出原生滑鼠事件。
+  CSS 選擇器點擊，這仍然會送出原生滑鼠事件。覆蓋層藏起來之後，作業系統層的像素點擊也能
+  到達 HTML（`human-pointer.ps1 -Click` 吃 CSS 座標）。
 - `human-pointer.ps1` 會移動使用者真正的游標，所以在路徑執行期間滑鼠指標是被佔用的。
 - 部分宿主會擋下從 POSIX shell 呼叫 `powershell -File ...`，也會擋下命令字串中直接出現的
   `Add-Type`。請改用宿主的 PowerShell 工具、以絕對路徑呼叫腳本。

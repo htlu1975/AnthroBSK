@@ -80,16 +80,22 @@ used to be blockers are now solved:
   looks normal, so a screenshot cannot prove the overlay is hidden either. Only
   `screenshot` restores the attribute; `click`/`press`/`hover`/`observe` leave it
   hidden.
-- **OS wheel injection is a no-op here.** `human-wheel.ps1` sends real
-  `mouse_event(MOUSEEVENTF_WHEEL)` ticks with the window verified foreground, yet
-  the page scrolls zero times. Four variants (`±120`, `-1200`, `SetCursorPos`
-  first, `keybd_event PageDown`) all produced nothing. The wheel channel is not
-  usable from this environment.
-- **The page does not see wheel DOM events.** When `bsk` does scroll, a `wheel`
-  event reaches `window` capture (`isTrusted: true`) but is stopped before
-  `document` capture and before the target - `window.__wheelWinCap` increments
-  while `__wheelDocCap` stays 0, even though `scrollTop` changes. Something
-  between `window` and `document` calls `stopPropagation`.
+- **Real OS wheel reaches the page, but the page cannot scroll it.**
+  `human-wheel.ps1` sends `mouse_event(MOUSEEVENTF_WHEEL)`; Windows delivers the
+  wheel to the window *under the cursor*, not the foreground window, so park the
+  cursor over the scroll target first (`-CssX/-CssY` + viewport size). Parked,
+  with the overlay hidden, the page receives 4 genuine `wheel` events -
+  `isTrusted: true`, correct target, deltaY decaying 236 -> 166 -> 117 -> 82 - but
+  each arrives `defaultPrevented: true` and the box does not move. The page
+  defines no `wheel` handler, so the extension is `preventDefault`ing real wheel
+  in its isolated world at `window` capture. The earlier "OS wheel is a no-op"
+  note was a cursor-positioning artefact and is corrected here.
+- **When `bsk` scrolls, the page does not see the wheel event.** `bsk wheel`
+  moves `scrollTop` (verified 0 -> 496) and its event is *not*
+  `preventDefault`ed, yet it still never reaches `document` capture or the
+  target - `window.__wheelWinCap` increments while `__wheelDocCap` stays 0, even
+  though `scrollTop` changes. Something between `window` and `document` calls
+  `stopPropagation`.
 - **`isTrusted` does not separate the channels.** CDP-dispatched input
   (`bsk press`, `bsk click`) arrives as `isTrusted: true` exactly like
   `keybd_event` output, because both enter the renderer through the browser's
@@ -205,8 +211,9 @@ Verified 2026-10-11 on Windows 11, Chrome 155.0.0.0, bsk CLI / extension 0.3.2:
 
 Not verified here: any harness other than WorkBuddy, any OS other than Windows,
 and any bsk version other than 0.3.2. `human-wheel.ps1` parses and passes the
-offline checks but its wheel injection is a **confirmed no-op** on this host -
-do not rely on it.
+offline checks; once the cursor is parked its wheel events do reach the page, but
+the extension `preventDefault`s them, so it will not scroll - use `bsk wheel`
+for that.
 
 ## Known limitations
 
@@ -215,9 +222,11 @@ do not rely on it.
   overlay swallows it. Hiding is a deliberate cosmetic trade: the page looks
   normal, so a screenshot no longer shows the overlay dimming it. Any
   `screenshot` re-shows the overlay, so re-hide it afterwards.
-- **OS wheel injection does not work on this host.** `human-wheel.ps1` is
-  included but its `mouse_event(MOUSEEVENTF_WHEEL)` ticks produce no scroll even
-  with the window verified foreground; see "What still does not hold up".
+- **The wheel is split across two channels.** `bsk wheel` scrolls the page but
+  the page's own `wheel` handlers never run; `human-wheel.ps1` produces real,
+  page-visible `wheel` events that the extension `preventDefault`s so they do not
+  scroll. Pick by need - movement (`bsk wheel`) or page-visible events
+  (`human-wheel.ps1`). See "What still does not hold up".
 - OS cursor coordinates are CSS viewport pixels converted at run time from the
   window's real render-widget rect. Do not substitute `devicePixelRatio`: one
   measured window reported `1.5` while its true scale was `1.0`, and the same
@@ -230,11 +239,16 @@ do not rely on it.
   sends. 63-77 steps produced 43-52 events; the trajectory is real but thinned,
   and the largest gaps land mid-path where the pointer is fastest, not at the
   ends.
-- **IME mode is sticky.** After typing Chinese, ASCII keystrokes are
-  transliterated until an OS-level Shift switches the IME back. `bsk press
-  Shift` is rejected; the scripts send the Shift through `keybd_event`.
+- **IME mode is sticky, and it fails silently.** After typing Chinese, ASCII
+  keystrokes are transliterated (measured: `abc` arrived as `ㄇ`/`ㄏ` while the
+  script still reported `typos=0`), and navigation keys are swallowed (a real OS
+  `PageDown` fired no `keydown` until a Shift was tapped). Reset with an
+  OS-level Shift - `human-keys.ps1 -ImeReset` does it at the end of a run.
+  `bsk press Shift` is rejected; the scripts send the Shift through `keybd_event`.
 - Pixel clicks (`--image-x`/`--image-y`) are Canvas-only in `bsk`; HTML targets
-  are clicked by ref/selector, which still dispatches native mouse events.
+  are clicked by ref/selector, which still dispatches native mouse events. With
+  the overlay hidden, an OS pixel click reaches HTML too (`human-pointer.ps1
+  -Click` takes CSS coordinates).
 - `human-pointer.ps1` moves the user's real cursor, so the pointer is occupied
   for the duration of the path.
 - Some hosts reject a `powershell -File ...` invocation from a POSIX shell and a
