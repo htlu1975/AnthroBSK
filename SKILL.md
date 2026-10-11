@@ -121,6 +121,13 @@ element's position; they are the ordinary way to point at HTML controls.
 - Prefer clicking where the human-relevant element is, found via `observe` refs;
   obtain fresh refs before acting on screenshot or HTML findings.
 - Space/Enter also "press" many controls once focused - use them when a person would.
+- **If a `click` appears to do nothing, reach for the keyboard.** On a GitHub
+  settings page, `click @e42` on a submit button reported
+  `at=(577.2, 227.3)` while the button's real centre was `(831.2, 227.3)` - 254 px
+  away - and the form never submitted. Focusing the text field and pressing
+  `Enter` submitted it on the first try. Treat the `at=(x,y)` in click output as
+  informational rather than proof of where the click landed, and fall back to
+  `Tab`/`Enter`/`Space` when a click has no visible effect.
 
 ### Pointer trajectory (human feel)
 
