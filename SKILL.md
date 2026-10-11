@@ -1,5 +1,5 @@
 ---
-name: anthro-bsk
+name: anthrobsk
 description: |
   AnthroBSK - drive the user's logged-in Chromium browser the way a person
   does, with simulated mouse and keyboard actions: Bezier cursor trajectories
@@ -20,6 +20,11 @@ values or trigger behaviour through the DOM: `fill`, `select`, and `evaluate`
 are not inputs here. Everything below maps to commands that dispatch native
 `mousePressed`/`mouseReleased` and `keyDown`/`char`/`keyUp` events, the same
 events a human produces.
+
+Two bundled scripts go one level lower and drive the operating system's own
+input queue instead. Reach for them when the page should observe a real cursor
+trajectory or a human typing rhythm; everything else is ordinary `bsk` usage.
+Both are Windows-only and both are documented with their measured limits below.
 
 ## Before acting
 
@@ -117,16 +122,21 @@ element's position; they are the ordinary way to point at HTML controls.
   obtain fresh refs before acting on screenshot or HTML findings.
 - Space/Enter also "press" many controls once focused - use them when a person would.
 
-### Pointer trajectory and pauses (human feel)
+### Pointer trajectory (human feel)
 
-For visible, human-like cursor motion before a click, run the bundled script
-(it moves the **OS cursor** along a randomized cubic Bezier with jitter,
-overshoot-and-correct, and random micro-pauses):
+`click` and `hover` teleport: the page sees one `mousemove` at the target and
+nothing else. When the page should observe an actual path, run the bundled
+script, which drives the **OS cursor** along a randomized cubic Bezier with
+jitter, overshoot-and-correct and random micro-pauses:
 
 ```powershell
-& "<skill-dir>\scripts\human-pointer.ps1" -EndX <screenX> -EndY <screenY>
-# options: -StartX -StartY (default = current cursor) -DurationMs -JitterPx
-#          -PauseChance -MaxPauseMs -NoOvershoot -Seed
+& "<skill-dir>\scripts\human-pointer.ps1" `
+    -WindowTitleLike "<page title>" `
+    -ViewportWidth <innerWidth> -ViewportHeight <innerHeight> `
+    -EndCssX <x> -EndCssY <y> -Click
+# options: -StartCssX -StartCssY (default = current cursor) -DurationMs -JitterPx
+#          -PauseChance -MaxPauseMs -NoOvershoot -Seed -ClickButton
+# -ListWindows prints candidate windows and their viewport rects, moving nothing
 ```
 
 Invoke it through the host's PowerShell tool with an absolute path. A
@@ -135,52 +145,79 @@ policy (WorkBuddy/CodeBuddy block it), and some hosts also reject a literal
 `Add-Type` in the command string; calling the script by path avoids both. Where
 the PowerShell tool does not return stdout, redirect to a file and read it back.
 
-Coordinates are physical screen pixels in virtual-screen space (so a secondary
-monitor with a negative origin works). Derive them from the page geometry, read
-via `evaluate`:
+Get the page title, viewport size and target point in one read first:
 
-```
-X = (window.screenX + elementRect.x) * devicePixelRatio
-Y = (window.screenY + outerHeight - innerHeight + elementRect.y) * devicePixelRatio
+```sh
+bsk evaluate "JSON.stringify({t:document.title,w:innerWidth,h:innerHeight})" --session <id>
+bsk observe --session <id>    # refs carry `at=(x,y)`, the element centre in CSS px
 ```
 
-`outerHeight - innerHeight` is the window chrome height. Confirm one landing
-point before trusting a path.
+#### Which cursor API works (measured)
 
-**Verified limitation:** Chrome coalesces `mousemove` input, so a long OS
-trajectory usually reaches an Agent Window page as only the final point's
-event. The script makes the motion look natural on screen and spaces out
-actions; do not rely on it to satisfy in-page mouse-trajectory checks. For
-trajectory the page actually observes, approximate it at element level:
-`hover` 2-4 controls along a plausible route, each followed by a random
-pause, then click the target - every `hover`/`click` lands as a real native
-mouse event the page receives.
+Only one of the three obvious ways to move the OS cursor actually reaches the
+page. Do not substitute the others:
+
+| Call | Cursor moves | Page receives `mousemove` |
+| --- | --- | --- |
+| `SetCursorPos` | yes | **no** - 140 steps across the window produced 0 events |
+| `SendInput(MOUSEEVENTF_MOVE)` | **no** | no - returns 1 and is silently discarded |
+| `mouse_event(MOVE\|ABSOLUTE\|VIRTUALDESK)` | yes | **yes** |
+
+Two further requirements, both verified:
+
+- **The Agent Window must be the foreground window.** The same `mouse_event`
+  call delivers nothing while another window is in front. The script forces
+  focus with `AttachThreadInput` + `SetForegroundWindow` and *verifies* it took,
+  because `SetForegroundWindow` reports success even when the OS keeps focus
+  where it was. If focus cannot be taken the script exits without moving
+  anything, rather than silently producing a path nobody sees.
+- **Never hardcode the CSS-to-physical scale.** The mapping is
+  `physical = renderWidgetRect.origin + css * (renderWidgetRect.size / viewportCssSize)`,
+  taken from the largest `Chrome_RenderWidgetHostHWND` child of the window.
+  This is *not* `devicePixelRatio`: one measured window reported
+  `devicePixelRatio: 1.5` while its real scale was 1.0, and the same window
+  later moved to a monitor where the scale was 1.5. The script re-measures every
+  run.
+
+A verified run produced 54 `mousemove` events over ~1.2 s, with `movementX/Y`
+varying from 2 to 22 px and 5-49 ms between samples - a real trajectory rather
+than a teleport.
+
+#### The Agent Window is input-blocked by bsk's own overlay
+
+bsk injects `browser-skill-overlay` into the page's main world: `position:
+fixed`, `z-index: 2147483647`, `pointer-events: auto`, covering the whole
+viewport, carrying `data-bsk-overlay`, `data-bsk-overlay-surface` and
+`data-bsk-overlay-blocking` attributes plus a shadow root. Three consequences:
+
+- **OS-level clicks hit the overlay, not the page.**
+  `document.elementFromPoint(x, y)` returns `BROWSER-SKILL-OVERLAY` and the real
+  control receives no `mousedown`/`click`. So split the work: use `mouse_event`
+  for the *path*, then `bsk click @ref` for the *click*. The CLI's click targets
+  the element directly and stays consistent with the trajectory's final point.
+- **Do not try to remove or neutralise it.** It is re-injected automatically,
+  and its `:host{all:initial !important}` lives inside a CSS `@layer`, so both an
+  inline `pointer-events: none !important` and a rule injected into its shadow
+  root lose the cascade - unlayered `!important` is the weakest kind of
+  important declaration.
+- **It is a fingerprint.** Any page can run
+  `document.querySelector('browser-skill-overlay')` and know an agent is
+  driving. Read "What this skill is not" in the README before promising stealth.
 
 **Verified limitation - click timing (measured):** one `click` reaches the page
-as a single `mousemove` followed by `mousedown` 2-4 ms later and `mouseup`
-0.8-2 ms after that; the whole gesture completes in about 6 ms, and the
-`pointermove` carries one coalesced event with `pressure: 0` even while a
-button is down. A human press holds the button for roughly 60-120 ms after
-moving for 80-300 ms. These are properties of the CLI's own event dispatch, not
-of this skill: `click` has no hold-duration or pre-move option. Treat the
-timing as a known gap rather than something the recipes below can close.
+as a single `mousemove`, then `mousedown` 2-4 ms later, then `mouseup` 0.8-2 ms
+after that; the whole gesture completes in about 6 ms and `pointermove` carries
+`pressure: 0` even while a button is down. A human press holds the button for
+roughly 60-120 ms after moving for 80-300 ms. These are properties of the CLI's
+own dispatch: `click` has no hold-duration or pre-move option. `human-pointer.ps1
+-Click` does hold the button for a randomized 45-130 ms, but the overlay above
+means its click lands on the overlay rather than the control.
 
-**Verified limitation - keyboard (measured):** each `press` is a CDP `char`
-event, so the page sees `keydown` to `keyup` within a few milliseconds, and for
-CJK `keydown` carries `code: ""` with `keyCode: 0` while `keypress.keyCode` is
-the character's code point instead of a virtual key code. No
-`compositionstart`/`compositionupdate`/`compositionend` is emitted and
-`isComposing` stays `false`, so a page can tell that CJK text did not come from
-a real IME. `press` also accepts one BMP character per call: characters outside
-the Basic Multilingual Plane (emoji, CJK Extension B and above) are rejected
-with `press: unknown key`.
-
-**Verified limitation - pacing granularity (measured):** every `bsk` call
-starts a process and costs roughly 0.9-1.2 s, which dominates the per-key
-`wait-ms` values below. Measured inter-key intervals land within a few percent
-of each other, so the randomized pauses space actions out but do not produce a
-human-like typing rhythm. Batching several keystrokes into one call is the only
-way to regain sub-second control.
+**Verified limitation - pacing granularity (measured):** every `bsk` call starts
+a process and costs roughly 0.9-1.2 s, which dominates any per-key `wait-ms`.
+Measured inter-key intervals land within a few percent of each other, so the
+randomized pauses space actions out but do not produce a human-like rhythm. Use
+`scripts/human-keys.ps1` when typing rhythm matters.
 
 Random pauses between actions - vary them, never a fixed interval:
 
@@ -200,26 +237,71 @@ value with the keyboard, then press keys one at a time.
 | --- | --- |
 | Focus a field | `bsk click @e3 --session <id>` |
 | Select-all, then clear | `bsk press Ctrl+A --session <id>` then `bsk press Delete --session <id>` (or `Backspace`) |
-| Type one character | `bsk press a --session <id>` |
-| Type a string | loop one `press` per character (Unicode/CJK keys press directly, e.g. `bsk press 測 --session <id>`) |
+| Type one ASCII character | `bsk press a --session <id>` |
+| Type an ASCII string with real rhythm | `& "<skill-dir>\scripts\human-keys.ps1" -WindowTitleLike "<page title>" -Text "hello world"` |
+| Insert CJK / non-ASCII text | put it on the clipboard, then `bsk press Ctrl+V --session <id>` |
 | Special/combo keys | `bsk press Enter --session <id>`, `Tab`, `Escape`, `ArrowDown`, `Ctrl+C`, ... |
 | Hold a key | `bsk press x --hold-ms 300 --session <id>` |
 | Key on a specific element | `bsk press Enter --ref @e3 --session <id>` (focuses first) |
 | Human-ish pacing | `bsk wait-ms 120` between keystrokes/actions (daemon-side sleep, no `--session`) |
 
-Typing recipe (verified on ASCII and CJK), with randomized per-key pauses:
+### Choosing a channel (measured)
+
+| Input | Channel | Why |
+| --- | --- | --- |
+| ASCII, a few keys | `bsk press <ch>` | accurate event shape: `key`/`code`/`keyCode`, `keypress`, `insertText` |
+| ASCII, rhythm matters | `scripts/human-keys.ps1` | real OS keystrokes, ~190 ms per key with jitter |
+| CJK / any non-ASCII | **clipboard paste** | see below |
+
+`bsk press` on ASCII is correct - `key: "a"`, `code: "KeyA"`, `keyCode: 65`,
+`keypress` 97, and an `insertText` input event - and `--hold-ms` is honoured.
+Its only real weakness is the daemon round trip, which puts roughly 660 ms
+between consecutive keys; that gap is itself a signature.
+
+`scripts/human-keys.ps1` sends `keybd_event` keystrokes with per-key random hold
+and gap, plus an optional human slip (a wrong neighbour key, a pause, Backspace,
+retype) that still leaves exactly the intended text. It needs the Agent Window
+in the foreground and the field focused with `bsk focus @ref` first, and it
+refuses to type if it cannot take the foreground. Verified 3/3 runs.
+
+**CJK: paste, do not type.** `bsk press 測` emits `keydown` with `code: ""` and
+`keyCode: 0`, puts the code point in `keypress.keyCode`, and produces no
+`compositionstart`/`compositionupdate`/`compositionend` while `isComposing`
+stays `false` - a page can tell it never came from an IME. OS-level keystrokes
+do not close that either: driving a real IME means selecting candidates, and the
+layout handle resolves to `0x0` in this context so character translation is
+unreliable. A paste emits a genuine `insertFromPaste`, which is exactly what a
+human paste emits:
+
+```sh
+printf '%s' '台北 天氣' | clip.exe      # Windows: put the text on the clipboard
+bsk press Ctrl+V --session <id>        # page sees one insertFromPaste
+```
+
+Verified: real `press` events for `a` and `b` plus a pasted `台北天氣` arrive as
+`ab台北天氣`, the paste landing as a single `insertFromPaste` after one
+`keydown V`. For mixed text, type the ASCII runs and paste the CJK runs.
+
+`press` accepts one BMP character per call; characters outside the Basic
+Multilingual Plane (emoji, CJK Extension B and above) are rejected with
+`press: unknown key`.
+
+Typing recipe (ASCII) with randomized per-key pauses:
 
 ```sh
 bsk click @e3 --session <id>          # focus the field like a user
 bsk press Ctrl+A --session <id>       # wipe existing content
 bsk press Delete --session <id>
-for ch in H e l l o   測 試; do
+for ch in H e l l o; do
   bsk press "$ch" --session <id>
   bsk wait-ms $(((RANDOM % 110) + 50))                  # 50-160 ms, varies per key
 done
 bsk wait-ms $(((RANDOM % 500) + 300))                  # brief pause before submitting
 bsk press Enter --session <id>        # submit the way a person does
 ```
+
+For any non-ASCII run inside that string, break out and paste it (see the CJK
+recipe above) rather than pressing it character by character.
 
 - `Tab` / `Shift+Tab` move focus between controls; `Escape` closes popovers;
   arrow keys move within pages, lists and menus - prefer keyboard traversal
@@ -261,8 +343,17 @@ A task may need more than one reference as it progresses.
 
 ## Resources
 
-- `scripts/human-pointer.ps1` - moves the OS cursor along a randomized cubic
-  Bezier with speed easing, jitter, overshoot-and-correct, and random
-  micro-pauses; run it (see options in the Pointer trajectory section) before
-  clicks when visible human-like motion is wanted. Output is one line:
-  `ok path=(x,y)->(x,y) steps=N ms=T`. Requires Windows PowerShell; DPI-aware.
+- `scripts/human-pointer.ps1` - drives the OS cursor along a randomized cubic
+  Bezier (speed easing, jitter, overshoot-and-correct, micro-pauses) so the page
+  observes a real `mousemove` trajectory; optionally clicks at the end.
+  `-ListWindows` prints candidate windows and their viewport rects without
+  moving anything. Output is one line for the window, then one for the path:
+  `window hwnd=... viewport=... scale=(..) foreground=True` /
+  `path css=(x,y)->(x,y) physical=(x,y)->(x,y) steps=N ms=T`.
+- `scripts/human-keys.ps1` - types ASCII with `keybd_event` at ~190 ms per
+  key with jitter (191 ms/char measured at the defaults), plus optional
+  slip-and-correct. `-ListWindows` lists targets.
+
+Both require Windows PowerShell and are DPI-aware. Both exit non-zero with a
+reason when they cannot take the foreground, instead of acting on the wrong
+window.
