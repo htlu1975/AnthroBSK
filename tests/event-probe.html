@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AnthroBSK event probe</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  #log { white-space: pre-wrap; background: #f6f6f6; padding: 1rem; min-height: 8rem; }
+  input, button { font-size: 1rem; padding: .4rem .6rem; }
+</style>
+</head>
+<body>
+<h1>AnthroBSK event probe</h1>
+<p>Type in the field, move the mouse over the pad, scroll the wheel box. Counts update live.</p>
+<input id="field" value="" placeholder="focus then type here" size="40">
+<button id="dump">dump JSON</button>
+<button id="clear">clear</button>
+<div id="pad" style="margin:1rem 0;border:2px dashed #888;height:220px;display:flex;align-items:center;justify-content:center;">mouse pad</div>
+<div id="wheelbox" style="border:1px solid #888;height:120px;overflow:auto;">
+  <div style="height:600px;padding:.5rem;">wheel box (scroll me)</div>
+</div>
+<pre id="log"></pre>
+<script>
+// Records the same event stream the README/SKILL measured: mousemove deltas
+// and inter-sample gaps, keydown/keyup/keypress/beforeinput/input with
+// isTrusted, plus wheel ticks. Nothing leaves the page; Dump prints JSON.
+(function () {
+  var evts = [];
+  var t0 = performance.now();
+  function push(e) { evts.push(e); render(); }
+  var lastMove = null;
+  document.getElementById('pad').addEventListener('mousemove', function (ev) {
+    var now = performance.now();
+    var rec = { t: 'mousemove', x: ev.clientX, y: ev.clientY,
+      dx: ev.movementX, dy: ev.movementY, dt: lastMove == null ? 0 : +(now - lastMove).toFixed(1),
+      trusted: ev.isTrusted, ts: +(now - t0).toFixed(1) };
+    lastMove = now;
+    push(rec);
+  });
+  var field = document.getElementById('field');
+  ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+    field.addEventListener(type, function (ev) {
+      push({ t: type, key: ev.key, code: ev.code, keyCode: ev.keyCode,
+        composing: ev.isComposing, trusted: ev.isTrusted,
+        ts: +(performance.now() - t0).toFixed(1) });
+    });
+  });
+  // A real IME shows up here and nowhere else: compositionstart/update/end,
+  // data carrying the readings then the composed character.
+  ['compositionstart', 'compositionupdate', 'compositionend'].forEach(function (type) {
+    field.addEventListener(type, function (ev) {
+      push({ t: type, data: ev.data, trusted: ev.isTrusted,
+        ts: +(performance.now() - t0).toFixed(1) });
+    });
+  });
+  ['beforeinput', 'input'].forEach(function (type) {
+    field.addEventListener(type, function (ev) {
+      push({ t: type, data: ev.data, inputType: ev.inputType,
+        composing: ev.isComposing, trusted: ev.isTrusted,
+        value: field.value, ts: +(performance.now() - t0).toFixed(1) });
+    });
+  });
+  document.getElementById('wheelbox').addEventListener('wheel', function (ev) {
+    push({ t: 'wheel', dx: ev.deltaX, dy: ev.deltaY, mode: ev.deltaMode,
+      trusted: ev.isTrusted, ts: +(performance.now() - t0).toFixed(1) });
+  }, { passive: true });
+  // Real input was measured to reach a window capture listener but never the
+  // document or the target, while the scroll still happened. Count all three so
+  // the difference is visible instead of looking like "nothing was scrolled".
+  window.addEventListener('wheel', function () { window.__wheelWinCap = (window.__wheelWinCap || 0) + 1; }, true);
+  document.addEventListener('wheel', function () { window.__wheelDocCap = (window.__wheelDocCap || 0) + 1; }, true);
+  function summary() {
+    var moves = evts.filter(function (e) { return e.t === 'mousemove'; });
+    var keys = evts.filter(function (e) { return e.t === 'keydown'; });
+    var untrusted = evts.filter(function (e) { return !e.trusted; });
+    var dts = moves.map(function (e) { return e.dt; }).filter(function (d) { return d > 0; });
+    var dxs = moves.map(function (e) { return Math.abs(e.dx); });
+    return { total: evts.length, mousemove: moves.length, keydown: keys.length,
+      keyup: evts.filter(function (e) { return e.t === 'keyup'; }).length,
+      composition: evts.filter(function (e) { return e.t.indexOf('composition') === 0; }).length,
+      wheel: evts.filter(function (e) { return e.t === 'wheel'; }).length,
+      wheelWinCapture: window.__wheelWinCap || 0,
+      wheelDocCapture: window.__wheelDocCap || 0,
+      untrusted: untrusted.length,
+      untrustedKinds: untrusted.map(function (e) { return e.t; }),
+      moveDtMin: dts.length ? Math.min.apply(null, dts) : 0,
+      moveDtMax: dts.length ? Math.max.apply(null, dts) : 0,
+      moveDxMax: dxs.length ? Math.max.apply(null, dxs) : 0,
+      fieldValue: field.value };
+  }
+  function render() {
+    document.getElementById('log').textContent = JSON.stringify(summary(), null, 1);
+  }
+  document.getElementById('dump').onclick = function () {
+    document.getElementById('log').textContent =
+      JSON.stringify({ summary: summary(), events: evts }, null, 1);
+  };
+  document.getElementById('clear').onclick = function () { evts = []; lastMove = null; render(); };
+  window.__probe = { events: function () { return evts; }, summary: summary, clear: function () { evts = []; render(); } };
+  render();
+})();
+</script>
+</body>
+</html>
