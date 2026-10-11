@@ -5,7 +5,7 @@ letter with no composition at all. OS-level keystrokes from
 `scripts/human-keys.ps1` reach the installed IME and produce a genuine
 composition stream (`keyCode 229`, `compositionstart`/`update`/`end`,
 `inputType: insertCompositionText`, `isComposing: true`). Verified: typing
-`w961o3` produced `台北`, tone mark committing each syllable, no space needed.
+`w961o3` produced `?啣?`, tone mark committing each syllable, no space needed.
 
 ## Feed readings, not characters
 
@@ -14,18 +14,14 @@ must supply the **zhuyin reading keystrokes**, not the CJK characters:
 
 | Syllable | Zhuyin | Keystrokes | Note |
 | --- | --- | --- | --- |
-| 台 | ㄊㄞˊ | `w` `9` `6` | consonant + vowel + tone commits |
-| 北 | ㄅㄟˇ | `1` `o` `3` | `1` starts the next syllable |
+| ??| ??? | `w` `9` `6` | consonant + vowel + tone commits |
+| ??| ??? | `1` `o` `3` | `1` starts the next syllable |
 
-## Key map (Daqian / 大千 layout, US keyboard)
+## Key map (Daqian / 憭批? layout, US keyboard)
 
-Consonants: `1`ㄅ `q`ㄆ `a`ㄇ `z`ㄈ `2`ㄉ `w`ㄊ `s`ㄋ `x`ㄌ `e`ㄍ `d`ㄎ `c`ㄏ
-`r`ㄐ `f`ㄑ `v`ㄒ `5`ㄓ `t`ㄔ `g`ㄕ `b`ㄖ `y`ㄗ `h`ㄘ `n`ㄙ
-
-Vowels: `u`ㄧ `j`ㄨ `m`ㄩ `8`ㄚ `i`ㄛ `k`ㄜ `,`ㄝ `9`ㄞ `o`ㄟ `l`ㄠ `.`ㄡ `0`ㄢ
-`p`ㄣ `-`ㄤ `/`ㄥ
-
-Tones: `6`ˊ (2nd) `3`ˇ (3rd) `4`ˋ (4th) `7`˙ (neutral); 1st tone needs no mark.
+Consonants: `1`??`q`??`a`??`z`??`2`??`w`??`s`??`x`??`e`??`d`??`c`??`r`??`f`??`v`??`5`??`t`??`g`??`b`??`y`??`h`??`n`??
+Vowels: `u`??`j`??`m`??`8`??`i`??`k`??`,`??`9`??`o`??`l`??`.`??`0`??`p`??`-`??`/`??
+Tones: `6`? (2nd) `3`? (3rd) `4`? (4th) `7`? (neutral); 1st tone needs no mark.
 The tone keystroke **commits** the syllable.
 
 ## Sticky mode and reset
@@ -34,6 +30,14 @@ After Chinese, the IME stays in Chinese mode and ASCII keeps transliterating.
 Reset with an OS-level Shift: `human-keys.ps1 ... -ImeReset` taps it at the end
 while the foreground guarantee holds. `bsk press Shift` is rejected - never use
 it for this.
+
+This is not cosmetic. With the IME still on, a later ASCII run silently
+mistypes - `human-keys.ps1 -Text "abc"` reports `typed 3 char(s) ... typos=0`
+while the field receives `? and `?, and navigation keys are swallowed (a real
+OS `PageDown` produced no `keydown` at all until an OS Shift was tapped, then it
+scrolled normally). So before any ASCII or navigation-key run, confirm the IME
+is off - tap an OS Shift if unsure. The script cannot detect this, because it
+never reads the field back.
 
 ## Mixed ASCII + CJK recipe (one field, focus held throughout)
 
