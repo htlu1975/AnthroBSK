@@ -36,7 +36,7 @@ fix properly. Measurements from README/SKILL (Windows, Chrome 155, bsk 0.3.2).
   `pressure: 0.5` while down, 0 untrusted events. Verified against a `<button>`
   whose handler fired.
 - **Ask:** `bsk click --hold-ms <n> --move-ms <n> [--dwell-ms <n>]` dispatched
-  through the same native path, so hover → dwell → press → hold → release is one
+  through the same native path, so hover ??dwell ??press ??hold ??release is one
   gesture instead of teleport + 6 ms tap. This is the last piece that still needs
   the skill to shell out to Windows-only code.
 
@@ -54,22 +54,31 @@ fix properly. Measurements from README/SKILL (Windows, Chrome 155, bsk 0.3.2).
   hold durations. For CJK, either expose a real IME path or state explicitly that
   CDP cannot drive an IME, so skills stop assuming `press` covers it.
 
-## 4. Multi-tick wheel
+## 4. Multi-tick wheel, and wheel events that reach the page
 
 - **Today:** `wheel --delta-y 600` is one discrete jump; humans send 3-6 decaying
   ticks. Each call costs ~1 s, so scripting decay via repeated calls is slow.
-- **Two obstacles found on Windows.** (a) `mouse_event(MOUSEEVENTF_WHEEL)` is a
-  no-op on this machine in every variant tried (`±120`, `-1200`, `SetCursorPos`
-  first, and even `keybd_event` PageDown), while the window was verified
-  foreground throughout - so an OS-level `human-wheel.ps1` cannot currently
-  substitute. (b) Pages never receive `wheel` DOM events: with real input a
-  `window` capture listener fires with `isTrusted: true`, while `document`
-  capture and the target listener never fire, even though `scrollTop` changes -
-  something stops propagation between `window` and `document`.
-- **Ask:** `bsk wheel --delta-y <n> --ticks <k> --decay <f>` emitting a decayed
-  burst natively, and a decision on whether page-visible `wheel` events are
-  intended at all. If they are not, say so; skills currently cannot tell a
-  silently-swallowed wheel from a page that has nothing to scroll.
+- **The real mechanism (measured - corrects an earlier wrong note).**
+  `mouse_event(MOUSEEVENTF_WHEEL)` does work; the earlier "no-op" verdict was a
+  cursor-positioning artefact. Windows sends the wheel to the window *under the
+  cursor*, not the foreground window, and the cursor was parked over another app.
+  With the cursor parked over a scrollable box and the overlay hidden, the page
+  receives 4 `wheel` events - `isTrusted: true`, correct target, deltaY decaying
+  236 -> 166 -> 117 -> 82 - but each arrives `defaultPrevented: true` and the box
+  does not scroll. The probe page defines no `wheel` handler, so the extension is
+  `preventDefault`ing real wheel in its isolated world at `window` capture; it
+  also `stopPropagation`s, so `document` capture and the target listener never
+  fire (the main world's `Event.prototype.preventDefault` never sees the call).
+  It exempts its own CDP event: `bsk wheel` scrolls (`scrollTop` 496,
+  `defaultPrevented: false`). Keyboard navigation is unaffected - a real OS
+  `PageDown` scrolled the page and fired a trusted `keydown` (an earlier
+  "PageDown does nothing" note was the Chinese IME eating the key, not this).
+- **Ask:** (a) `bsk wheel --delta-y <n> --ticks <k> --decay <f>` emitting a
+  decayed burst natively. (b) Stop swallowing real `wheel` at `window` capture -
+  or state explicitly that page-visible `wheel` events are intentionally
+  withheld. Today the split is: `bsk wheel` scrolls but the page cannot observe
+  it; `human-wheel.ps1` produces real, page-visible `wheel` events the page
+  cannot act on. Either way, say which one the caller gets.
 
 ## 5. Readiness primitive
 
