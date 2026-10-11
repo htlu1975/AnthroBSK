@@ -202,6 +202,13 @@ viewport, carrying `data-bsk-overlay`, `data-bsk-overlay-surface` and
   control receives no `mousedown`/`click`. So split the work: use `mouse_event`
   for the *path*, then `bsk click @ref` for the *click*. The CLI's click targets
   the element directly and stays consistent with the trajectory's final point.
+  Measured on a GitHub upload page: the overlay's bounding rect was exactly the
+  viewport (`0,0 1707x769`), and sampling *two* points - the commit-summary input
+  at `(878, 410)` and the submit button at `(370, 640)` - both returned
+  `BROWSER-SKILL-OVERLAY` as the topmost element. An `human-pointer.ps1 -Click`
+  aimed at the input moved the cursor to the right physical pixel and held the
+  button for 95 ms, yet `document.activeElement` stayed on the previously focused
+  element: the click was swallowed end to end.
 - **Do not try to remove or neutralise it.** It is re-injected automatically,
   and its `:host{all:initial !important}` lives inside a CSS `@layer`, so both an
   inline `pointer-events: none !important` and a rule injected into its shadow
@@ -257,7 +264,7 @@ value with the keyboard, then press keys one at a time.
 | Input | Channel | Why |
 | --- | --- | --- |
 | ASCII, a few keys | `bsk press <ch>` | accurate event shape: `key`/`code`/`keyCode`, `keypress`, `insertText` |
-| ASCII, rhythm matters | `scripts/human-keys.ps1` | real OS keystrokes, ~190 ms per key with jitter |
+| ASCII, rhythm matters | `scripts/human-keys.ps1` | real OS keystrokes, ~190-230 ms per key with jitter |
 | CJK / any non-ASCII | **clipboard paste** | see below |
 
 `bsk press` on ASCII is correct - `key: "a"`, `code: "KeyA"`, `keyCode: 65`,
@@ -268,8 +275,48 @@ between consecutive keys; that gap is itself a signature.
 `scripts/human-keys.ps1` sends `keybd_event` keystrokes with per-key random hold
 and gap, plus an optional human slip (a wrong neighbour key, a pause, Backspace,
 retype) that still leaves exactly the intended text. It needs the Agent Window
-in the foreground and the field focused with `bsk focus @ref` first, and it
-refuses to type if it cannot take the foreground. Verified 3/3 runs.
+in the foreground and the field focused first - and because the overlay eats OS
+clicks (see above), focus it with `bsk click --selector '<css>'`, never with
+`human-pointer.ps1 -Click`. It refuses to type if it cannot take the foreground.
+
+#### The overlay blocks the mouse but not the keyboard (measured)
+
+The overlay sits in the hit-testing path, so it swallows OS *clicks*, but
+keystrokes go to whatever element holds focus and never pass through
+hit-testing. That asymmetry is the practical recipe: **focus with `bsk click`,
+type with `human-keys.ps1`.** You get a real OS keystroke stream with zero
+overlay interference.
+
+A live run on a GitHub commit form, with listeners attached to the focused
+input, produced **265 events, 100% `isTrusted: true`, 0 untrusted**:
+
+| Event | Count |
+| --- | --- |
+| `keydown` / `keyup` | 54 / 54 |
+| `keypress` | 51 |
+| `beforeinput` / `input` | 53 / 53 |
+
+The `keypress` count is 3 lower because Backspace does not fire it - and those
+3 missing `keypress` events are the proof that the slip-and-fix path really ran.
+The captured `keydown` sequence for the string `note keyboard fallback when a
+click has no effect` was:
+
+```
+A n o t e   k e y b o a r d   f a l r ⌫ l b a c t ⌫ k   w h e n   a   c l i c k   h a s   n o   e f f e c t
+```
+
+Two genuine corrections - `fal`+`r` → Backspace → `l` (fallback), and `bac`+`t`
+→ Backspace → `k` (back) - and the field still ended up holding the exact
+intended text.
+
+**`isTrusted` does not separate the channels.** Do not reach for it as a
+detector. CDP-dispatched input (`bsk press`, `bsk click`) arrives as
+`isTrusted: true` just like `keybd_event` output, because both enter the
+renderer through the browser's real input pipeline. If you need to argue that
+one channel is more human than the other, argue from *timing and event shape*,
+not from trust. What actually differs: OS keystrokes carry real hold durations
+and a human-shaped inter-key rhythm (~231 ms/char measured, jittered), while
+`bsk press` is locked to roughly 660 ms per key by the daemon round trip.
 
 **CJK: paste, do not type.** `bsk press 測` emits `keydown` with `code: ""` and
 `keyCode: 0`, puts the code point in `keypress.keyCode`, and produces no
@@ -357,9 +404,11 @@ A task may need more than one reference as it progresses.
   moving anything. Output is one line for the window, then one for the path:
   `window hwnd=... viewport=... scale=(..) foreground=True` /
   `path css=(x,y)->(x,y) physical=(x,y)->(x,y) steps=N ms=T`.
-- `scripts/human-keys.ps1` - types ASCII with `keybd_event` at ~190 ms per
-  key with jitter (191 ms/char measured at the defaults), plus optional
-  slip-and-correct. `-ListWindows` lists targets.
+- `scripts/human-keys.ps1` - types ASCII with `keybd_event` at ~190-230 ms per
+  key with jitter (191 ms/char on an idle run, 231 ms/char on a busy one), plus
+  optional slip-and-correct. `-ListWindows` lists targets.
+  Pair it with `bsk click --selector` for focus: the overlay swallows OS clicks
+  but never sees OS keystrokes.
 
 Both require Windows PowerShell and are DPI-aware. Both exit non-zero with a
 reason when they cannot take the foreground, instead of acting on the wrong

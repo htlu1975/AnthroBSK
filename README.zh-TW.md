@@ -45,10 +45,22 @@ AnthroBSK 讓**互動模型**像真人。它**不會**讓產生出來的事件�
   而且不是本技能能藏得掉的。
 - **作業系統層的點擊碰不到頁面內容。** 同一個覆蓋層的 `pointer-events` 是 `auto`，所以
   `document.elementFromPoint(x, y)` 會回傳 `BROWSER-SKILL-OVERLAY`，真正的控制項收不到
-  `mousedown`／`click`。想中和它也沒用：它會被自動重新注入，而且它的
-  `:host{all:initial !important}` 位於 CSS 的 `@layer` 內，所以行內
+  `mousedown`／`click`。實測（GitHub 上傳頁）：覆蓋層的邊界矩形**正好等於整個 viewport**
+  （`0,0 1707x769`），取兩個不同的點——一個文字輸入框與一個送出按鈕——回傳的都是
+  `BROWSER-SKILL-OVERLAY`。對準輸入框送一次作業系統層點擊，游標確實移到正確的實體像素、
+  按鍵也按住了 95 ms，但焦點完全沒動：這次點擊從頭到尾被吃掉了。想中和它也沒用：它會被
+  自動重新注入，而且它的 `:host{all:initial !important}` 位於 CSS 的 `@layer` 內，所以行內
   `pointer-events: none !important` 與注入到它 shadow root 的規則**都會在串接中落敗**
   （未分層的 `!important` 是最弱的一種）。因此點擊只能走 `bsk click`，由它直接鎖定元素。
+- **覆蓋層擋得住滑鼠，但擋不住鍵盤。** 按鍵會送到當下取得焦點的元素，完全不經過命中測試，
+  所以作業系統層打字不受影響。實務上的做法就是這樣：先用
+  `bsk click --selector '<css>'` 聚焦欄位，再用真實的 `keybd_event` 按鍵打字。實測一次
+  GitHub 提交表單的填寫，事件探針收到 **265 個事件，100% `isTrusted: true`，零個不可信**，
+  其中還包含兩次真實的「打錯就修」——`fal`+`r` → Backspace → `l`，以及 `bac`+`t` →
+  Backspace → `k`——而欄位最後仍舊一字不差。
+- **`isTrusted` 分不出這兩個通道。** 由 CDP 派送的輸入（`bsk press`、`bsk click`）同樣以
+  `isTrusted: true` 抵達，跟 `keybd_event` 的輸出沒有差別，因為兩者都是經由瀏覽器真正的
+  輸入管線進入 renderer。別把它當成隱蔽性的保證。真正有差的是**時序與事件形狀**。
 - **點擊時序。** 一次 `bsk click` 到達頁面時只有一個 `mousemove`，接著 2–4 ms 後送出
   `mousedown`，再 0.8–2 ms 後送出 `mouseup`——整個手勢約 6 ms。真人移動 80–300 ms 之後
   會按住按鍵 60–120 ms。那個 `pointermove` 只帶一個合併事件，而且按鍵按下的期間
@@ -63,7 +75,7 @@ AnthroBSK 讓**互動模型**像真人。它**不會**讓產生出來的事件�
   `insertFromPaste`，但貼上終究還是貼上。
 - **透過 CLI 打 ASCII 的間隔。** 每一次 `bsk press` 都要一趟完整的 daemon 往返，所以連續
   按鍵之間約隔 660 ms——**比真人打字更規律，而不是更像人**。`scripts/human-keys.ps1`
-  能修掉節奏問題（每鍵約 190 ms 且帶抖動），但僅限 ASCII。
+  能修掉節奏問題（實測每鍵約 190–230 ms，且帶抖動），但僅限 ASCII。
 
 一句話總結：它能通過「這個操作是不是自動化的？」這種靜態檢查，但過不了行為層面的檢查，
 而且藏不住 bsk 留在頁面裡的足跡。如果你要對抗的是 Akamai、Cloudflare Bot Management、

@@ -56,11 +56,29 @@ than injected at the DOM.
 - **OS-level clicks cannot reach page content.** That same overlay has
   `pointer-events: auto`, so `document.elementFromPoint(x, y)` returns
   `BROWSER-SKILL-OVERLAY` and the real control receives no `mousedown`/`click`.
-  Neutralising it does not work: it is re-injected automatically, and its
-  `:host{all:initial !important}` sits inside a CSS `@layer`, so both an inline
-  `pointer-events: none !important` and a rule injected into its shadow root lose
-  the cascade (unlayered `!important` is the weakest kind). Clicks therefore have
-  to go through `bsk click`, which targets the element directly.
+  Measured on a GitHub upload page, the overlay's bounding rect was exactly the
+  viewport (`0,0 1707x769`) and sampling two separate points - a text input and
+  a submit button - returned `BROWSER-SKILL-OVERLAY` at both. An OS-level click
+  aimed at the input moved the cursor to the correct physical pixel and held the
+  button for 95 ms, yet focus never moved: the click was swallowed end to end.
+  Neutralising the overlay does not work: it is re-injected automatically, and
+  its `:host{all:initial !important}` sits inside a CSS `@layer`, so both an
+  inline `pointer-events: none !important` and a rule injected into its shadow
+  root lose the cascade (unlayered `!important` is the weakest kind). Clicks
+  therefore have to go through `bsk click`, which targets the element directly.
+- **The overlay blocks the mouse but not the keyboard.** Keystrokes go to
+  whatever element holds focus and never traverse hit-testing, so OS-level
+  typing is unaffected. This gives the practical recipe: focus the field with
+  `bsk click --selector '<css>'`, then type with real `keybd_event` keystrokes.
+  A live run on a GitHub commit form produced **265 events, 100% `isTrusted:
+  true`, 0 untrusted**, including two genuine slip-and-fix corrections
+  (`fal`+`r` → Backspace → `l`, and `bac`+`t` → Backspace → `k`) that still left
+  the field holding exactly the intended text.
+- **`isTrusted` does not separate the channels.** CDP-dispatched input
+  (`bsk press`, `bsk click`) arrives as `isTrusted: true` exactly like
+  `keybd_event` output, because both enter the renderer through the browser's
+  real input pipeline. Do not offer it as a stealth guarantee. What actually
+  differs is timing and event shape - see the timing bullets below.
 - **Click timing.** One `bsk click` reaches the page as a single `mousemove`,
   then `mousedown` 2-4 ms later, then `mouseup` 0.8-2 ms after that - roughly
   6 ms for the whole gesture. A human holds the button 60-120 ms after moving for
@@ -80,7 +98,7 @@ than injected at the DOM.
 - **ASCII key spacing through the CLI.** Every `bsk press` costs a full daemon
   round trip, so consecutive keys land about 660 ms apart - more regular than
   human typing, not less. `scripts/human-keys.ps1` fixes the rhythm (about
-  190 ms per key with jitter) but only for ASCII.
+  190-230 ms per key with jitter) but only for ASCII.
 
 In short: it passes static "is this automated?" checks, fails behavioral ones,
 and does not hide bsk's own footprint in the page. For anti-bot work (Akamai,
