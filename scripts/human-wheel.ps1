@@ -15,8 +15,15 @@ window. If the cursor is sitting over the terminal, the page scrolls zero times
 no matter how correct everything else is. So position the cursor over a
 scrollable target first: either run human-pointer.ps1 there beforehand, or pass
 -CssX/-CssY with the viewport size and this script positions it for you using
-the same render-widget mapping. The earlier "OS wheel is a no-op" finding was
-measured WITHOUT this step, so treat it as unretested, not disproven.
+the same render-widget mapping.
+
+Parking is necessary but NOT sufficient. Measured with the cursor parked over a
+scrollable box and the overlay hidden: 4 wheel events reach the page with
+isTrusted:true, the right target and a decaying deltaY - and the box still does
+not scroll, because the extension preventDefaults real wheel in its isolated
+world at window capture (see the wheel section in SKILL.md). bsk's own
+`bsk wheel` is exempt, so it scrolls. Use this script when you need genuine
+wheel events in the page; use `bsk wheel` when you need the page to move.
 
 Usage:
   & human-wheel.ps1 -WindowTitleLike "My Page - Google Chrome" -DeltaY 600
