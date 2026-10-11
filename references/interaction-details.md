@@ -12,6 +12,33 @@
   scroll distance. An optional target is scrolled into view first; without one,
   input lands at the viewport centre. Observe to check the page's response.
 
+## Waiting for readiness
+
+`wait-for-navigation` blocks until a page-lifecycle phase and is the reliable
+way to wait for a load or a client-side route change:
+
+```sh
+bsk wait-for-navigation --wait-until load --session <id>
+bsk wait-for-navigation --wait-until networkidle --timeout 20s --session <id>
+```
+
+Phases are `load` (default), `domcontentloaded`, `networkidle` and `commit`.
+`--timeout` takes a duration such as `30s`, `1m` or `1500ms`. A timeout is
+reported in the result rather than by a distinct exit status, so read the
+output. Navigation invalidates refs: `observe` after it returns before acting.
+
+`wait-ms` sleeps daemon-side for a fixed duration and takes no `--session`. It
+is the blunt instrument for spacing actions out, never a readiness signal.
+
+`wait-for-element` does not exist in CLI 0.3.2 - only `wait-ms` and
+`wait-for-navigation` do. Do not write a selector wait. For a page change use
+`wait-for-navigation`, then `observe` and act on fresh refs.
+
+A wheel scroll is one discrete event. A human wheel arrives as several small
+deltas that decay; one `wheel --delta-y 600` is a single jump. Where the scroll
+itself matters, send two or three decreasing deltas instead, accepting that
+each call costs about a second.
+
 ### Large observations
 
 There is no default token cap. With `observe --max-tokens <n>`, follow a returned
