@@ -23,12 +23,15 @@ input queue rather than through CDP. Feed it the zhuyin readings and it types
 Chinese with a genuine composition stream - keydown reports key="Process" /
 keyCode 229, there are two keyups per key, and the page sees compositionstart /
 compositionupdate / insertCompositionText with isComposing true. Verified by
-typing `w961o3` (ㄊㄞˊ then ㄅㄟˇ) to get 台北, on Windows with Microsoft Bopomofo
+typing `w961o3` (??? then ???) to get ?啣?, on Windows with Microsoft Bopomofo
 active. The tone mark auto-commits, so no Space is needed.
 
 Two consequences to handle:
   - The IME mode is sticky per window. After a CJK run the next ASCII run is
-    silently converted to zhuyin; send one OS-level Shift to switch back.
+    silently converted to zhuyin - this script still reports success
+    ("typos=0"), so verify the field, not the log. Navigation keys are eaten too
+    (a real OS PageDown fired no keydown until a Shift was tapped). Send one
+    OS-level Shift to switch back; -ImeReset does it at the end of a run.
   - `bsk press` can do neither job: CDP input bypasses the IME completely. With
     the IME in Chinese mode, `bsk press a` inserts a literal "a".
 Paste stays the simpler default for arbitrary CJK - a paste produces a genuine
