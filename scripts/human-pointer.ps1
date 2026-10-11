@@ -255,7 +255,9 @@ else {
     return 10*$t*$t*$t - 15*$t*$t*$t*$t + 6*$t*$t*$t*$t*$t
   }
 
-  $steps = [int]([Math]::Max(18, [Math]::Min(140, $dist / 4)))
+  # Cap at 90: Chrome coalesces mousemove anyway (a 140-step path landed as
+  # 43-52 events), so extra steps cost time without adding page-visible motion.
+  $steps = [int]([Math]::Max(18, [Math]::Min(90, $dist / 4)))
 
   # Optional human overshoot: fly slightly past, settle back on the last 25%.
   $ox = $endPX; $oy = $endPY
