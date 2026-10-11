@@ -26,7 +26,7 @@ Live, with a `bsk` session `<id>`:
    Expect the field to hold the exact text, `keydown`/`keyup` counts matching,
    `keypress` lower by the Backspace count when a typo fired.
 6. Keys (CJK, real IME): with Microsoft Bopomofo active, run
-   `human-keys.ps1 -WindowTitleLike <title> -Text "w961o3"`. Expect `?啣?`, six
+   `human-keys.ps1 -WindowTitleLike <title> -Text "w961o3"`. Expect `台北`, six
    `compositionupdate` events, `isComposing: true`, and exactly one untrusted
    `compositionend` on blur. Press an **OS-level** Shift afterwards before
    typing ASCII again - the IME mode is sticky, and `bsk press Shift` is rejected.
@@ -52,5 +52,5 @@ Live, with a `bsk` session `<id>`:
    e. Navigation keys are NOT blocked: with the IME off, an OS `PageDown` scrolled
       `scrollY` 93 -> 366 and fired a trusted `keydown`. If it appears dead, the
       Chinese IME is on and eating the key - tap an OS Shift first.
-8. Paste: `printf '%s' '?啣?憭拇除' | clip.exe`, then `bsk press Ctrl+V`.
-   Expect one `insertFromPaste` and value `ab?啣?憭拇除` when mixed with typed `ab`.
+8. Paste: `printf '%s' '台北天氣' | clip.exe`, then `bsk press Ctrl+V`.
+   Expect one `insertFromPaste` and value `ab台北天氣` when mixed with typed `ab`.
