@@ -6,10 +6,16 @@ see a natural pointer trajectory.
 
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File human-pointer.ps1 -EndX 800 -EndY 500
-  Optional: -StartX -StartY -DurationMs -JitterPx -PauseChance -MaxPauseMs -Overshoot -Seed
+  Optional: -StartX -StartY -DurationMs -JitterPx -PauseChance -MaxPauseMs -NoOvershoot -Seed
 
-Coordinates are SCREEN pixels. The target browser window must be visible
+Coordinates are SCREEN pixels in the virtual-screen space, so a secondary
+monitor with a negative origin works. The target browser window must be visible
 (not minimized) for the page to receive the events.
+
+Caveat: this moves the OS cursor. Chrome coalesces mousemove input, so a long
+trajectory usually reaches an Agent Window page as only the final point's
+event. The motion looks natural on screen and spaces out actions; it is not a
+guarantee that the page observes a trajectory.
 #>
 param(
   [double]$StartX = -1,
@@ -52,8 +58,14 @@ if ($DurationMs -le 0) {
   if ($DurationMs -lt 250) { $DurationMs = 250 }; if ($DurationMs -gt 1400) { $DurationMs = 1400 }
 }
 
-# Screen bounds clamp helper values
-$scrW = [H.U]::GetSystemMetrics(0); $scrH = [H.U]::GetSystemMetrics(1)
+# Virtual-screen bounds, not primary-monitor bounds. GetSystemMetrics(0)/(1)
+# are SM_CXSCREEN/SM_CYSCREEN, which describe the primary monitor only: using
+# them would squash every intermediate point of a path that ends on a secondary
+# display. The 76-79 metrics cover the whole virtual screen.
+$vsX = [H.U]::GetSystemMetrics(76)    # SM_XVIRTUALSCREEN
+$vsY = [H.U]::GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
+$scrW = [H.U]::GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+$scrH = [H.U]::GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
 
 # Perpendicular unit vector for control-point offsets
 $px = -$dy / $dist; $py = $dx / $dist
@@ -98,7 +110,8 @@ for ($i = 0; $i -le $steps; $i++) {
 
   $cx = $bx + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx
   $cy = $by + ($rnd.NextDouble() - 0.5) * 2 * $JitterPx
-  $cx = [Math]::Max(0, [Math]::Min($scrW - 1, $cx)); $cy = [Math]::Max(0, [Math]::Min($scrH - 1, $cy))
+  $cx = [Math]::Max($vsX, [Math]::Min($vsX + $scrW - 1, $cx))
+  $cy = [Math]::Max($vsY, [Math]::Min($vsY + $scrH - 1, $cy))
   [void][H.U]::SetCursorPos([int][Math]::Round($cx), [int][Math]::Round($cy))
 
   # pacing: target wall-clock time for this step
