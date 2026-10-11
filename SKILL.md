@@ -123,15 +123,29 @@ For visible, human-like cursor motion before a click, run the bundled script
 (it moves the **OS cursor** along a randomized cubic Bezier with jitter,
 overshoot-and-correct, and random micro-pauses):
 
-```sh
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/human-pointer.ps1 -EndX <screenX> -EndY <screenY>
+```powershell
+& "<skill-dir>\scripts\human-pointer.ps1" -EndX <screenX> -EndY <screenY>
 # options: -StartX -StartY (default = current cursor) -DurationMs -JitterPx
 #          -PauseChance -MaxPauseMs -NoOvershoot -Seed
 ```
 
-Coordinates are physical screen pixels; on a scaled monitor derive them from
-the page's `screenX/screenY * devicePixelRatio` (read via `evaluate`) plus the
-window chrome height, and confirm one landing point before trusting a path.
+Invoke it through the host's PowerShell tool with an absolute path. A
+`powershell -File ...` call from a POSIX shell can be rejected by host security
+policy (WorkBuddy/CodeBuddy block it), and some hosts also reject a literal
+`Add-Type` in the command string; calling the script by path avoids both. Where
+the PowerShell tool does not return stdout, redirect to a file and read it back.
+
+Coordinates are physical screen pixels in virtual-screen space (so a secondary
+monitor with a negative origin works). Derive them from the page geometry, read
+via `evaluate`:
+
+```
+X = (window.screenX + elementRect.x) * devicePixelRatio
+Y = (window.screenY + outerHeight - innerHeight + elementRect.y) * devicePixelRatio
+```
+
+`outerHeight - innerHeight` is the window chrome height. Confirm one landing
+point before trusting a path.
 
 **Verified limitation:** Chrome coalesces `mousemove` input, so a long OS
 trajectory usually reaches an Agent Window page as only the final point's
@@ -141,6 +155,32 @@ trajectory the page actually observes, approximate it at element level:
 `hover` 2-4 controls along a plausible route, each followed by a random
 pause, then click the target - every `hover`/`click` lands as a real native
 mouse event the page receives.
+
+**Verified limitation - click timing (measured):** one `click` reaches the page
+as a single `mousemove` followed by `mousedown` 2-4 ms later and `mouseup`
+0.8-2 ms after that; the whole gesture completes in about 6 ms, and the
+`pointermove` carries one coalesced event with `pressure: 0` even while a
+button is down. A human press holds the button for roughly 60-120 ms after
+moving for 80-300 ms. These are properties of the CLI's own event dispatch, not
+of this skill: `click` has no hold-duration or pre-move option. Treat the
+timing as a known gap rather than something the recipes below can close.
+
+**Verified limitation - keyboard (measured):** each `press` is a CDP `char`
+event, so the page sees `keydown` to `keyup` within a few milliseconds, and for
+CJK `keydown` carries `code: ""` with `keyCode: 0` while `keypress.keyCode` is
+the character's code point instead of a virtual key code. No
+`compositionstart`/`compositionupdate`/`compositionend` is emitted and
+`isComposing` stays `false`, so a page can tell that CJK text did not come from
+a real IME. `press` also accepts one BMP character per call: characters outside
+the Basic Multilingual Plane (emoji, CJK Extension B and above) are rejected
+with `press: unknown key`.
+
+**Verified limitation - pacing granularity (measured):** every `bsk` call
+starts a process and costs roughly 0.9-1.2 s, which dominates the per-key
+`wait-ms` values below. Measured inter-key intervals land within a few percent
+of each other, so the randomized pauses space actions out but do not produce a
+human-like typing rhythm. Batching several keystrokes into one call is the only
+way to regain sub-second control.
 
 Random pauses between actions - vary them, never a fixed interval:
 
@@ -214,7 +254,7 @@ A task may need more than one reference as it progresses.
 | Website debugging, reproduction evidence, or requests rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| Waiting for navigation or readiness, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |
