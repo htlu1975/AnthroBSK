@@ -30,8 +30,18 @@ Live, with a `bsk` session `<id>`:
    `compositionupdate` events, `isComposing: true`, and exactly one untrusted
    `compositionend` on blur. Press an **OS-level** Shift afterwards before
    typing ASCII again - the IME mode is sticky, and `bsk press Shift` is rejected.
-7. Wheel: run `human-wheel.ps1 -WindowTitleLike <title> -DeltaY 600`. **Known
-   no-op on this host** - the page scrolls zero times even with the window
-   verified foreground. Treat a 0-scroll result as expected, not a failure.
+7. Wheel: the old "no-op" verdict is SUSPECT - it was measured without parking
+   the cursor (Windows sends the wheel to the window UNDER THE CURSOR, not the
+   foreground window). Retest protocol:
+   a. Hide the overlay (step 2), then park the cursor over the probe's wheel
+      box: `human-wheel.ps1 -WindowTitleLike <title> -DeltaY 600
+      -ViewportWidth <w> -ViewportHeight <h> -CssX <box-x> -CssY <box-y>`.
+   b. Expect 3-6 decaying `wheel` events, 0 untrusted. If still zero, run the
+      control: same ticks at Notepad - if Notepad scrolls, the OS path works
+      and the block is in Chrome/bsk; if Notepad also ignores it, the block is
+      OS-level (UIPI/integrity) on this host.
+   c. Also re-check the window-vs-document capture split with the overlay
+      hidden; the earlier stopPropagation finding may have been the visible
+      overlay swallowing the event, not the extension.
 8. Paste: `printf '%s' '台北天氣' | clip.exe`, then `bsk press Ctrl+V`.
    Expect one `insertFromPaste` and value `ab台北天氣` when mixed with typed `ab`.

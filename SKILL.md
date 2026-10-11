@@ -107,6 +107,17 @@ bsk evaluate --session <id> \
   'document.querySelector("browser-skill-overlay").setAttribute("data-bsk-capture-hidden","")'
 ```
 
+Verify it worked functionally, not visually - a screenshot cannot prove the
+overlay is hidden (the page looks normal either way). Probe hit-testing at a
+known point instead; a real tag name means hidden, the overlay tag means it
+is back:
+
+```sh
+bsk evaluate --session <id> \
+  'document.elementFromPoint(850, 400).tagName'
+# => "INPUT" / "BUTTON" ... hidden, OS input will land. "BROWSER-SKILL-OVERLAY" ... re-hide.
+```
+
 That is a deliberate trade-off: the overlay is the user's only on-page signal that
 an agent is driving their browser, so say in the task summary that it was hidden
 and why. Details and the measured effect are in "The overlay, and how to get OS
@@ -524,6 +535,7 @@ A task may need more than one reference as it progresses.
 | Choosing input channel (click vs path vs type vs paste vs wheel vs drag) | [Decision tree](references/decision-tree.md) |
 | Proposing CLI/extension fixes upstream (overlay, click timing, batch type, wheel, waits) | [Upstream proposals](references/upstream-proposals.md) |
 | Verifying a change (offline checks + live probe steps) | [tests/README.md](tests/README.md) |
+| Typing CJK through the real IME (zhuyin map, sticky reset, mixed recipe) | [CJK IME](references/cjk-ime.md) |
 
 ## Resources
 
@@ -542,15 +554,19 @@ A task may need more than one reference as it progresses.
   slip-and-correct and rare transposition fixes (output reports
   `typos=/transposes=/bursts=`). Because it is real OS input it also reaches the
   installed IME, so the same script types CJK when you feed it the zhuyin
-  readings. `-ListWindows` lists targets.
+  readings (see [CJK IME](references/cjk-ime.md)); `-ImeReset` taps an OS-level
+  Shift at the end to unstick the IME before ASCII continues. `-ListWindows`
+  lists targets.
   Pair it with `bsk click --selector` for focus: the overlay swallows OS clicks
   but never sees OS keystrokes.
 - `scripts/human-wheel.ps1` - scrolls with a decaying 3-6 tick OS wheel burst
   (40-140 ms gaps, coasting pause) intended to give the page multiple `wheel`
   events instead of one jump. `-DeltaY > 0` scrolls down, `< 0` scrolls up.
-  **Not verified working:** OS wheel injection was a no-op on this machine in
-  every variant tried, and pages do not receive `wheel` DOM events anyway. Use
-  `bsk wheel` and confirm the scroll position yourself.
+  Windows sends the wheel to the window under the cursor, so park it over a
+  scrollable target first with `-CssX/-CssY` (+ viewport size), or position it
+  with `human-pointer.ps1` beforehand. Earlier no-op measurements skipped this
+  step and are unretested, not disproven - see `tests/README.md` step 7. Until
+  re-verified, confirm the scroll position yourself after wheeling.
 
 All three require Windows PowerShell and are DPI-aware. All exit non-zero with a
 reason when they cannot take the foreground, instead of acting on the wrong

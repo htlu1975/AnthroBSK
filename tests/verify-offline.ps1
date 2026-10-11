@@ -43,6 +43,11 @@ $wheel = Get-Content (Join-Path $root 'scripts/human-wheel.ps1') -Raw
 foreach ($need in @('0x0800', '0x1000', 'Ticks', 'decay')) {
   if ($wheel -match [regex]::Escape($need)) { Ok "human-wheel.ps1 contains '$need'" } else { Bad "human-wheel.ps1 missing '$need'" }
 }
+# The wheel goes to the window under the cursor, not the foreground window, so
+# the script must be able to park the cursor over the scroll target first.
+foreach ($need in @('$CssX', 'FindWidget', 'Move-Physical', 'parked')) {
+  if ($wheel -match [regex]::Escape($need)) { Ok "human-wheel.ps1 contains '$need'" } else { Bad "human-wheel.ps1 missing '$need' (cursor parking)" }
+}
 if ($wheel -match '\-\$wy') { Ok 'human-wheel.ps1 negates Y (screen-Y-down to wheel sign)' }
 else { Bad 'human-wheel.ps1 Y-sign convention missing (-$wy)' }
 # Regression guard: mouse_event's dwData must not be cast to [uint32]. PowerShell

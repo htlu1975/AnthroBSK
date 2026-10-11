@@ -52,6 +52,7 @@ param(
   [int]$BurstMax = 15,
   [int]$StartDelayMs = 400,
   [int]$Seed = 0,
+  [switch]$ImeReset,      # tap an OS-level Shift at the end (unsticks a Chinese IME)
   [switch]$ListWindows
 )
 
@@ -287,6 +288,13 @@ for ($idx = 0; $idx -lt $chars.Length; $idx++) {
 
 $ms = [int]([DateTime]::UtcNow - $t0).TotalMilliseconds
 Write-Output "typed $typed char(s) in ${ms}ms (~$([Math]::Round($ms / [Math]::Max(1,$typed),0))ms/char) typos=$typos transposes=$transposes bursts=$bursts seed=$Seed"
+if ($ImeReset) {
+  # The IME mode is sticky: after Chinese, ASCII keeps transliterating until an
+  # OS-level Shift switches it back. bsk press Shift is rejected, so do it here
+  # while the foreground guarantee still holds.
+  Send-Key $VK_SHIFT $false ($rnd.Next($HoldMsMin, $HoldMsMax + 1))
+  Write-Output 'ime-reset: tapped OS Shift'
+}
 if ($unsupported.Count -gt 0) {
   $uniq = ($unsupported | Select-Object -Unique) -join ''
   Write-Output "SKIPPED $($unsupported.Count) char(s) not in the US table: '$uniq' (CJK goes through the OS IME - feed the zhuyin readings like 'w961o3', not the characters; otherwise paste)"

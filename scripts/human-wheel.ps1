@@ -10,19 +10,35 @@ sees real wheel events with isTrusted:true while the Agent Window is in the
 foreground. Same focus contract as human-pointer/human-keys: it forces the
 Agent Window to the foreground and exits non-zero if it cannot.
 
+Windows routes the wheel to the window UNDER THE CURSOR, not to the foreground
+window. If the cursor is sitting over the terminal, the page scrolls zero times
+no matter how correct everything else is. So position the cursor over a
+scrollable target first: either run human-pointer.ps1 there beforehand, or pass
+-CssX/-CssY with the viewport size and this script positions it for you using
+the same render-widget mapping. The earlier "OS wheel is a no-op" finding was
+measured WITHOUT this step, so treat it as unretested, not disproven.
+
 Usage:
   & human-wheel.ps1 -WindowTitleLike "My Page - Google Chrome" -DeltaY 600
   & human-wheel.ps1 -WindowTitleLike "..." -DeltaY -400 -Ticks 5
+  & human-wheel.ps1 -WindowTitleLike "..." -DeltaY 600 `
+      -ViewportWidth 1707 -ViewportHeight 769 -CssX 850 -CssY 400
   & human-wheel.ps1 -ListWindows
 
   -DeltaY > 0 scrolls down, < 0 scrolls up (CSS px intent, converted to ticks).
   -Ticks 0 = auto (3-6 by distance). -Seed for reproducibility.
+  -CssX/-CssY: CSS-px point to park the cursor over before wheeling.
+  Requires -ViewportWidth/-ViewportHeight; omit both to skip positioning.
 #>
 param(
   [string]$WindowTitleLike = "",
   [int]$DeltaY = 400,
   [int]$DeltaX = 0,
   [int]$Ticks = 0,
+  [double]$CssX = -1,
+  [double]$CssY = -1,
+  [double]$ViewportWidth = 0,
+  [double]$ViewportHeight = 0,
   [int]$Seed = 0,
   [switch]$ListWindows
 )
@@ -34,21 +50,28 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -Namespace W -Name U -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern bool GetCursorPos(out P p);
+[StructLayout(LayoutKind.Sequential)] public struct P { public int X; public int Y; }
+[DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
 [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, int d, System.UIntPtr e);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EP cb, System.IntPtr l);
+[DllImport("user32.dll")] public static extern bool EnumChildWindows(System.IntPtr h, EP cb, System.IntPtr l);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(System.IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(System.IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out R r);
+[StructLayout(LayoutKind.Sequential)] public struct R { public int L; public int T; public int Rt; public int B; }
 [DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(System.IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int cmd);
-[DllImport("user32.dll")] public static extern bool EnumWindows(EP cb, System.IntPtr l);
-[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(System.IntPtr h, System.Text.StringBuilder s, int n);
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(System.IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 public delegate bool EP(System.IntPtr h, System.IntPtr l);
 public static string Want = "";
 public static System.IntPtr Found = System.IntPtr.Zero;
+public static System.Collections.Generic.List<System.IntPtr> Kids = new System.Collections.Generic.List<System.IntPtr>();
 public static bool Cb(System.IntPtr h, System.IntPtr l) {
   if (!IsWindowVisible(h)) return true;
   var c = new System.Text.StringBuilder(256); GetClassNameW(h, c, 256);
@@ -56,10 +79,25 @@ public static bool Cb(System.IntPtr h, System.IntPtr l) {
   if (c.ToString() == "Chrome_WidgetWin_1" && t.ToString().Contains(Want)) { Found = h; return false; }
   return true;
 }
+public static bool KidCb(System.IntPtr h, System.IntPtr l) {
+  var c = new System.Text.StringBuilder(256); GetClassNameW(h, c, 256);
+  if (c.ToString() == "Chrome_RenderWidgetHostHWND") Kids.Add(h);
+  return true;
+}
 public static System.IntPtr FindTop(string want) {
   Found = System.IntPtr.Zero; Want = want;
   EnumWindows(new EP(Cb), System.IntPtr.Zero);
   return Found;
+}
+public static System.IntPtr FindWidget(System.IntPtr top) {
+  Kids.Clear(); EnumChildWindows(top, new EP(KidCb), System.IntPtr.Zero);
+  System.IntPtr best = System.IntPtr.Zero; long bestArea = -1;
+  for (int i = 0; i < Kids.Count; i++) {
+    R r; if (!GetWindowRect(Kids[i], out r)) continue;
+    long a = (long)(r.Rt - r.L) * (r.B - r.T);
+    if (a > bestArea) { bestArea = a; best = Kids[i]; }
+  }
+  return best;
 }
 public static string TitleOf(System.IntPtr h) {
   var t = new System.Text.StringBuilder(512); GetWindowTextW(h, t, 512); return t.ToString();
@@ -101,6 +139,34 @@ if (-not (Set-ForegroundVerified $top)) {
   exit 5
 }
 Start-Sleep -Milliseconds $rnd.Next(150, 350)  # settle after focus
+
+function Move-Physical([int]$x, [int]$y) {
+  $vsX = [W.U]::GetSystemMetrics(76); $vsY = [W.U]::GetSystemMetrics(77)
+  $vsW = [W.U]::GetSystemMetrics(78); $vsH = [W.U]::GetSystemMetrics(79)
+  $nx = [int][Math]::Round(($x - $vsX) * 65535.0 / ($vsW - 1))
+  $ny = [int][Math]::Round(($y - $vsY) * 65535.0 / ($vsH - 1))
+  [W.U]::mouse_event(0x0001 -bor 0x8000 -bor 0x4000, $nx, $ny, 0, [System.UIntPtr]::Zero)
+}
+
+$parked = 'skipped (no -CssX/-CssY)'
+if ($CssX -ge 0 -and $CssY -ge 0) {
+  if ($ViewportWidth -le 0 -or $ViewportHeight -le 0) {
+    Write-Output 'ERROR: -CssX/-CssY need -ViewportWidth/-ViewportHeight (CSS px)'; exit 2
+  }
+  $wid = [W.U]::FindWidget($top)
+  if ($wid -eq [System.IntPtr]::Zero) { Write-Output 'ERROR: no render widget under the window'; exit 3 }
+  $r = [W.U+R]::new(); [void][W.U]::GetWindowRect($wid, [ref]$r)
+  $scaleX = ($r.Rt - $r.L) / $ViewportWidth
+  $scaleY = ($r.B - $r.T) / $ViewportHeight
+  if ($scaleX -lt 0.4 -or $scaleX -gt 4 -or $scaleY -lt 0.4 -or $scaleY -gt 4) {
+    Write-Output "ERROR: implausible scale ($scaleX,$scaleY). Check viewport size."; exit 4
+  }
+  $px = [int][Math]::Round($r.L + $CssX * $scaleX)
+  $py = [int][Math]::Round($r.T + $CssY * $scaleY)
+  Move-Physical $px $py
+  Start-Sleep -Milliseconds $rnd.Next(120, 280)  # let hover settle under cursor
+  $parked = "cursor parked at physical=($px,$py) css=($CssX,$CssY)"
+}
 
 # Decide tick count: bigger intent = more ticks, 3-6 typical for a flick.
 $total = [Math]::Abs($DeltaY) + [Math]::Abs($DeltaX)
@@ -147,3 +213,4 @@ for ($i = 0; $i -lt $Ticks; $i++) {
 
 $ms = [int]([DateTime]::UtcNow - $t0).TotalMilliseconds
 Write-Output "wheel delta=($DeltaX,$DeltaY) ticks=$Ticks ms=$ms seed=$Seed"
+Write-Output $parked
